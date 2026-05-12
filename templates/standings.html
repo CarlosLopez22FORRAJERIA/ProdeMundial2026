@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-title compact-title">
+  <div>
+    <p class="eyebrow">Ranking</p>
+    <h1>Tablas y premios</h1>
+  </div>
+</section>
+
+<section class="layout-main">
+  <div class="card">
+    <div class="card-head">
+      <h2>Tabla general</h2>
+      <span class="hint">Suma de todas las etapas</span>
+    </div>
+    <div class="score-table standings-table">
+      <div class="score-table-head">
+        <span>Usuario</span>
+        <span title="Acertados/Exactos">Marcador</span>
+        <span title="Marcador exacto: 3 pts. Resultado correcto: 1 pt.">Puntos</span>
+      </div>
+      {% for row in rows %}
+        <div class="score-table-row {{ 'current-user' if row.user.id == g.user.id else '' }}">
+          <span class="has-tip" tabindex="0" title="{{ row.user.username }}" data-tip="{{ row.user.username }}">{{ loop.index }}. {{ rank_badge(loop.index) }} {{ row.user.username }}</span>
+          <strong>{{ row.hits }}/{{ row.exact }}</strong>
+          <strong>{{ row.total }}</strong>
+        </div>
+      {% else %}
+        <p class="empty">Sin participantes.</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <aside class="side-stack">
+    <section class="card">
+      <div class="card-head">
+        <h2>Distribución</h2>
+      </div>
+      <div class="data-list">
+        {% for prize in prize_rows %}
+          <div><span>{{ prize.name }} · {{ prize.percent }}%</span><strong>{{ prize.amount|money }}</strong></div>
+        {% endfor %}
+      </div>
+    </section>
+  </aside>
+</section>
+
+<section class="card section">
+  <div class="card-head">
+    <h2>Por etapa</h2>
+  </div>
+  <div class="stage-grid">
+    {% for key, board in stage_rows.items() %}
+      {% set has_activity = board|selectattr('points')|list|length > 0 %}
+      <article class="stage-card">
+        <h3>{{ stage_label(key) }}</h3>
+        {% set winners = stage_winners[key].users %}
+        {% if winners %}
+          <p class="stage-winners" title="{{ winners|join(', ') }}">{{ winners|length }}x👑</p>
+        {% endif %}
+        {% if has_activity %}
+          <div class="stage-score-head">
+            <span>Usuario</span><span title="Acertados/Exactos">Marcador</span><span title="Marcador exacto: 3 pts. Resultado correcto: 1 pt.">Pts</span>
+          </div>
+          {% for item in board[:6] %}
+            <div class="stage-score-row {{ 'current-user' if item.user.id == g.user.id else '' }}">
+              <span class="stage-user has-tip" tabindex="0" title="{{ item.user.username }}" data-tip="{{ item.user.username }}">{{ rank_badge(loop.index) }} {{ item.user.username }}</span>
+              <strong>{{ item.hits }}/{{ item.exact }}</strong>
+              <strong>{{ item.points }}</strong>
+            </div>
+          {% endfor %}
+        {% else %}
+          <div class="stage-position-head">
+            <span>Posicion general actual</span>
+          </div>
+          {% for row in rows[:6] %}
+            <div class="stage-position-row {{ 'current-user' if row.user.id == g.user.id else '' }}">
+              <span class="rank-mini">{{ loop.index }}</span>
+              <strong class="has-tip" tabindex="0" title="{{ row.user.username }}" data-tip="{{ row.user.username }}">{{ rank_badge(loop.index) }} {{ row.user.username }}</strong>
+            </div>
+          {% else %}
+            <p class="empty">Sin participantes.</p>
+          {% endfor %}
+        {% endif %}
+      </article>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

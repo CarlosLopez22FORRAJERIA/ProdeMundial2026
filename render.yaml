@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: prode-mundial-2026
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python -c \"from app import init_db; init_db()\" && gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120"
+    envVars:
+      - key: PRODE_DATA_DIR
+        value: /var/data
+      - key: PRODE_SECRET_KEY
+        generateValue: true
+    disk:
+      name: prode-data
+      mountPath: /var/data
+      sizeGB: 1

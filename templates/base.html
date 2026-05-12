@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ app_name }}{% if current_page_label() %} - {{ current_page_label() }}{% endif %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v=asset_version('styles.css')) }}">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-wrap">
+      <a class="brand" href="{{ url_for('dashboard') if g.user else url_for('index') }}">{{ app_name }}</a>
+      {% if current_page_label() %}<span class="page-location">- {{ current_page_label() }}</span>{% endif %}
+      {% if g.user and g.database_name != 'principal' %}
+        <span class="db-pill">{{ g.database_name }}</span>
+      {% endif %}
+    </div>
+    {% if g.user %}
+      <nav class="main-nav" aria-label="Principal">
+        <a class="{{ 'active' if request.endpoint == 'dashboard' else '' }}" href="{{ url_for('dashboard') }}">Jugar</a>
+        <a class="{{ 'active' if request.endpoint == 'fixture' else '' }}" href="{{ url_for('fixture') }}">Fixture</a>
+        <a class="{{ 'active' if request.endpoint == 'standings' else '' }}" href="{{ url_for('standings') }}">Tablas</a>
+        <a class="{{ 'active' if request.endpoint == 'chat' else '' }}" href="{{ url_for('chat') }}">Chat</a>
+        <a class="{{ 'active' if request.endpoint == 'legal_info' else '' }}" href="{{ url_for('legal_info') }}">Info</a>
+        {% if g.user.is_admin %}<a class="{{ 'active' if request.endpoint == 'admin' else '' }}" href="{{ url_for('admin') }}">Admin</a>{% endif %}
+        <a href="{{ url_for('logout') }}">Salir</a>
+      </nav>
+    {% endif %}
+  </header>
+  <main class="shell">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="flashes">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

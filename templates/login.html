@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="login-layout">
+  <div class="login-copy">
+    <p class="eyebrow">Copa Mundial de Fútbol de 2026</p>
+    <h1>{{ app_name }}</h1>
+    <p>Para obtener tus datos de ingreso, enviá el recibo de la transferencia hecha. Después ingresá, cargá tus marcadores de la etapa abierta y seguí posiciones, premios y fixture desde cualquier dispositivo.</p>
+  </div>
+  <form class="card form-card" method="post" action="{{ url_for('login') }}">
+    <div class="card-head">
+      <h2>Acceso</h2>
+      {% if current_database != 'principal' %}
+        <span class="db-pill">Base: {{ current_database }}</span>
+      {% endif %}
+    </div>
+    <input type="hidden" name="database_name" value="{{ current_database }}">
+    <label>Usuario <input name="username" autocomplete="username" required></label>
+    <label>Clave <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Entrar</button>
+  </form>
+</section>
+{% endblock %}

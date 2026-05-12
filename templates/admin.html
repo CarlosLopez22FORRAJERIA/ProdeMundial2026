@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-title compact-title">
+  <div>
+    <p class="eyebrow">Administracion</p>
+    <h1>Panel admin</h1>
+  </div>
+</section>
+
+<section class="admin-grid">
+  <details class="card admin-block" open>
+    <summary>Usuarios</summary>
+    <form class="inline-form" method="post" action="{{ url_for('admin_create_user') }}">
+      <input name="username" placeholder="Usuario" required>
+      <input name="display_name" placeholder="Nombre y apellido" required>
+      <input name="password" placeholder="Clave" required>
+      <label class="check"><input type="checkbox" name="is_admin"> Admin</label>
+      <label class="check"><input type="checkbox" name="is_debugger"> Debug</label>
+      <label class="check"><input type="checkbox" name="force_password_change" checked> Cambia clave</label>
+      <button>Crear</button>
+    </form>
+
+    <div class="admin-list compact-admin-list">
+      {% for user in users %}
+        <details class="user-card">
+          <summary>
+            <span>
+              <strong>@{{ user.username }}</strong>
+              <small>{{ user.display_name }}</small>
+            </span>
+            <span class="user-badges">
+              <b>{{ "Admin" if user.is_admin else "Usuario" }}</b>
+              {% if user.is_debugger %}<b>Debug</b>{% endif %}
+              {% if user.is_banned %}<b class="danger-text">Ban</b>{% endif %}
+              {% if user.force_password_change %}<b>Clave pendiente</b>{% endif %}
+              <b class="{{ 'ok-text' if accepted_current_terms(user) else 'danger-text' }}">{{ "Aceptó vigente" if accepted_current_terms(user) else "Debe aceptar" }}</b>
+            </span>
+            <span class="edit-hint">Editar</span>
+          </summary>
+
+          <div class="user-card-body">
+            <form class="user-edit-form" method="post" action="{{ url_for('admin_update_user', user_id=user.id) }}">
+              <input name="username" value="{{ user.username }}" aria-label="Usuario">
+              <input name="display_name" value="{{ user.display_name }}" aria-label="Nombre y apellido">
+              <input name="password" placeholder="Nueva clave" aria-label="Nueva clave">
+              <select name="role" aria-label="Rol">
+                <option value="user" {% if not user.is_admin %}selected{% endif %}>Usuario</option>
+                <option value="admin" {% if user.is_admin %}selected{% endif %}>Admin</option>
+              </select>
+              <label class="check"><input type="checkbox" name="is_debugger" {% if user.is_debugger %}checked{% endif %}> Debug</label>
+              <label class="check"><input type="checkbox" name="is_banned" {% if user.is_banned %}checked{% endif %}> Ban</label>
+              <label class="check"><input type="checkbox" name="force_password_change" {% if user.force_password_change %}checked{% endif %}> Cambia clave</label>
+              <button>Guardar cambios</button>
+            </form>
+
+            <div class="user-secondary-actions">
+              <form class="user-timeout-form" method="post" action="{{ url_for('admin_timeout', user_id=user.id) }}">
+                <input name="minutes" type="number" value="15" min="1" aria-label="Minutos">
+                <input name="reason" placeholder="Motivo timeout">
+                <button class="secondary-button">Timeout</button>
+              </form>
+
+              <form class="user-delete-form" method="post" action="{{ url_for('admin_delete_user', user_id=user.id) }}" onsubmit="return confirm('Eliminar este usuario y sus datos?')">
+                <button class="danger-button" {% if user.id == g.user.id %}disabled{% endif %}>Eliminar usuario</button>
+              </form>
+            </div>
+          </div>
+        </details>
+      {% endfor %}
+    </div>
+  </details>
+
+  {% if can_debug %}
+  <details class="card admin-block">
+    <summary>Debugger, sandboxes y respaldos</summary>
+    <div class="database-panel">
+      <div>
+        <strong>Base activa: {{ current_database }}</strong>
+        <small>{{ "principal protegida" if is_primary_database else "sandbox" }}</small>
+      </div>
+      <form method="post" action="{{ url_for('debug_select_database') }}">
+        <select name="database">
+          {% for db in databases %}
+            <option value="{{ db.name }}" {% if db.name == current_database %}selected{% endif %}>{{ db.name }}</option>
+          {% endfor %}
+        </select>
+        <button>Cambiar base</button>
+      </form>
+      <form method="post" action="{{ url_for('debug_clone_database') }}">
+        <input name="name" placeholder="nombre-sandbox">
+        <button>Clonar base actual</button>
+      </form>
+    </div>
+    {% if is_primary_database %}
+      <div class="flash error">La base principal esta protegida: no permite datos fake. Clona una sandbox para debuggear.</div>
+    {% endif %}
+    <div class="debug-grid">
+      <form class="debug-card" method="post" action="{{ url_for('debug_fake_users') }}">
+        <strong>Usuarios falsos</strong>
+        <input name="count" type="number" min="1" max="50" value="8">
+        <button>Crear usuarios</button>
+      </form>
+      <form class="debug-card" method="post" action="{{ url_for('debug_fake_predictions') }}">
+        <strong>Predicciones fake</strong>
+        <select name="stage_key">{% for stage in stages %}<option value="{{ stage.stage_key }}">{{ stage.label }}</option>{% endfor %}</select>
+        <button>Cargar predicciones</button>
+      </form>
+      <form class="debug-card" method="post" action="{{ url_for('debug_fake_results') }}">
+        <strong>Resultados fake</strong>
+        <select name="stage_key">{% for stage in stages %}<option value="{{ stage.stage_key }}">{{ stage.label }}</option>{% endfor %}</select>
+        <button>Cargar resultados</button>
+      </form>
+      <form class="debug-card" method="post" action="{{ url_for('debug_backup', kind='full') }}">
+        <strong>Backup general</strong>
+        <span class="hint">Usuarios, partidos, picks, chat y config.</span>
+        <button>Descargar JSON</button>
+      </form>
+      <form class="debug-card" method="post" action="{{ url_for('debug_backup', kind='users') }}">
+        <strong>Backup usuarios</strong>
+        <span class="hint">Usuarios, picks y sanciones.</span>
+        <button>Descargar JSON</button>
+      </form>
+      <form class="debug-card" method="post" action="{{ url_for('debug_backup', kind='chat') }}">
+        <strong>Backup chat</strong>
+        <span class="hint">Mensajes y moderacion.</span>
+        <button>Descargar JSON</button>
+      </form>
+      <form class="debug-card" method="post" action="{{ url_for('debug_backup', kind='stage') }}">
+        <strong>Backup etapa</strong>
+        <select name="stage_key">{% for stage in stages %}<option value="{{ stage.stage_key }}">{{ stage.label }}</option>{% endfor %}</select>
+        <button>Descargar JSON</button>
+      </form>
+    </div>
+  </details>
+  {% endif %}
+
+  <details class="card admin-block">
+    <summary>Premios y API</summary>
+    <form class="settings-grid" method="post" action="{{ url_for('admin_settings') }}">
+      <label>Precio admision <input name="entry_price" value="{{ settings.entry_price }}"></label>
+      <label>% bonus <input name="bonus_percent" value="{{ settings.bonus_percent }}"></label>
+      {% for pos in range(1, 7) %}
+        <label>% puesto {{ pos }} <input name="podium_{{ pos }}_percent" value="{{ settings['podium_' ~ pos ~ '_percent'] }}"></label>
+      {% endfor %}
+      <label class="wide">URL fixture <input name="fixture_api_url" value="{{ settings.fixture_api_url }}"></label>
+      <label class="wide">URL partidos por fecha <input name="promiedos_games_url_template" value="{{ settings.promiedos_games_url_template }}"></label>
+      <label>Fechas <input name="promiedos_group_rounds" value="{{ settings.promiedos_group_rounds }}"></label>
+      <label>x-ver <input name="promiedos_x_ver" value="{{ settings.promiedos_x_ver }}"></label>
+      <button>Guardar</button>
+    </form>
+    <form class="sync-row" method="post" action="{{ url_for('admin_sync_promiedos') }}">
+      <span>Importa partidos y resultados sin duplicar.</span>
+      <button>Sincronizar Promiedos</button>
+    </form>
+  </details>
+
+  <details class="card admin-block">
+    <summary>Información legal</summary>
+    <form class="legal-editor" method="post" action="{{ url_for('admin_legal') }}">
+      <label>Texto que deben aceptar los usuarios
+        <textarea name="legal_text" rows="10" required>{{ settings.legal_text }}</textarea>
+      </label>
+      <div class="legal-editor-actions">
+        <span class="hint">Último cambio: {{ format_datetime(settings.legal_updated_at) }}</span>
+        <button>Guardar nueva versión</button>
+      </div>
+    </form>
+  </details>
+
+  <details class="card admin-block">
+    <summary>Auditoría</summary>
+    <div class="audit-list">
+      {% for group in audit_groups %}
+        <details class="audit-user">
+          <summary>
+            <span>
+              <strong>@{{ group.username }}</strong>
+              <small>{{ group.display_name }}</small>
+            </span>
+            <span>{{ group.count }} eventos</span>
+            <time>{{ format_datetime(group.last_at) }}</time>
+          </summary>
+          <div class="audit-user-events">
+            {% for log in group.logs %}
+              <article class="audit-row">
+                <div>
+                  <strong>{{ log.action }}</strong>
+                  <small>{{ log.detail or "Sin detalle" }}</small>
+                </div>
+                <div>
+                  <span>{{ log.ip_address }}</span>
+                  <small>{{ log.user_agent }}</small>
+                </div>
+                <time>{{ format_datetime(log.created_at) }}</time>
+              </article>
+            {% endfor %}
+          </div>
+        </details>
+      {% else %}
+        <p class="empty padded-empty">Sin registros todavía.</p>
+      {% endfor %}
+    </div>
+  </details>
+
+  <details class="card admin-block">
+    <summary>Etapas</summary>
+    <div class="stage-grid">
+      {% for stage in stages %}
+        <div class="stage-card action-card">
+          <strong>{{ stage.label }}</strong>
+          <small>{{ "Bloqueada" if stage.is_locked else "Abierta" }}</small>
+          <form method="post" action="{{ url_for('admin_activate_only_stage', stage_key=stage.stage_key) }}">
+            <button>Activar solo esta</button>
+          </form>
+          <form method="post" action="{{ url_for('admin_toggle_stage', stage_key=stage.stage_key) }}">
+            <button class="secondary-button">{{ "Abrir" if stage.is_locked else "Bloquear" }}</button>
+          </form>
+        </div>
+      {% endfor %}
+    </div>
+  </details>
+
+  <details class="card admin-block">
+    <summary>Resultados</summary>
+    <form class="result-form create-game" method="post" action="{{ url_for('admin_create_game') }}">
+      <select name="stage_key">
+        {% for stage in stages %}
+          <option value="{{ stage.stage_key }}">{{ stage.label }}</option>
+        {% endfor %}
+      </select>
+      <input name="starts_at" placeholder="2026-06-11 16:00">
+      <input name="home_team" placeholder="Local">
+      <input name="away_team" placeholder="Visitante">
+      <button>Agregar</button>
+    </form>
+    <div class="results-list">
+      {% for game in games %}
+        <form class="result-row" method="post" action="{{ url_for('admin_update_game', game_id=game.id) }}">
+          <span>{{ stage_label(game.stage_key) }}</span>
+          <strong>{{ game.home_team }} vs {{ game.away_team }}</strong>
+          <input name="home_score" type="number" placeholder="L" value="{{ game.home_score if game.home_score is not none else '' }}">
+          <input name="away_score" type="number" placeholder="V" value="{{ game.away_score if game.away_score is not none else '' }}">
+          <select name="result">
+            <option value="">Sin resultado</option>
+            <option value="home" {% if game.result == "home" %}selected{% endif %}>Gana local</option>
+            <option value="draw" {% if game.result == "draw" %}selected{% endif %}>Empate</option>
+            <option value="away" {% if game.result == "away" %}selected{% endif %}>Gana visitante</option>
+          </select>
+          <button>Guardar</button>
+        </form>
+      {% endfor %}
+    </div>
+  </details>
+
+  <details class="card admin-block">
+    <summary>Moderacion</summary>
+    <div class="data-list">
+      {% for sanction in sanctions %}
+        <div><span>@{{ sanction.username }} · {{ sanction.type }} · {{ sanction.reason }}</span><small>{{ sanction.created_at }}</small></div>
+      {% else %}
+        <p class="empty">Sin acciones registradas.</p>
+      {% endfor %}
+    </div>
+  </details>
+</section>
+{% endblock %}

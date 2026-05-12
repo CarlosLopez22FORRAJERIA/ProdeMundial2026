@@ -1,0 +1,319 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="chat-room" data-admin="{{ '1' if g.user.is_admin else '0' }}" data-username="{{ g.user.username }}">
+  <header class="room-top">
+    <div>
+      <p class="eyebrow">Chat general</p>
+      <h1>Sala del prode</h1>
+    </div>
+    <div class="room-actions">
+      {% if g.user.is_admin %}
+        <button id="clearChat" class="secondary-button" type="button">Limpiar sala</button>
+      {% endif %}
+      <a class="exit-chat" href="{{ url_for('dashboard') }}">Salir</a>
+    </div>
+  </header>
+
+  {% if active_timeout %}
+    <div class="flash error">No podés escribir por ahora: {{ active_timeout.reason }}</div>
+  {% endif %}
+
+  <div class="room-grid">
+    <section class="room-panel messages-panel">
+      <div class="room-panel-head">
+        <strong>Mensajes</strong>
+        <span id="roomStatus">Conectando...</span>
+      </div>
+      <div class="chat-feed-wrap">
+        <div id="chatMessages" class="chat-feed" aria-live="polite"></div>
+        <button id="liveChatButton" class="live-chat-button" type="button" hidden>Volver al vivo</button>
+      </div>
+      <form id="chatForm" class="chat-composer">
+        <input id="chatInput" name="body" maxlength="800" autocomplete="off" placeholder="Escribí un mensaje..." {% if active_timeout %}disabled{% endif %}>
+        <button {% if active_timeout %}disabled{% endif %}>Enviar</button>
+      </form>
+      <p id="chatError" class="form-note"></p>
+    </section>
+
+    <aside class="room-panel users-panel">
+      <div class="room-panel-head">
+        <strong>En la sala</strong>
+        <span id="userCount">0</span>
+      </div>
+      <div id="chatUsers" class="chat-users"></div>
+    </aside>
+  </div>
+</section>
+
+<div id="adminModal" class="modal-backdrop" hidden>
+  <section class="modal">
+    <header>
+      <div>
+        <p class="eyebrow">Moderación</p>
+        <h2 id="modalUserName">Usuario</h2>
+      </div>
+      <button id="modalClose" class="ghost small" type="button">Cerrar</button>
+    </header>
+    <p id="modalMessage" class="quoted-message"></p>
+    <label>Motivo <input id="modalReason" placeholder="Motivo para historial"></label>
+    <label>Timeout en minutos <input id="modalMinutes" type="number" min="1" value="15"></label>
+    <div class="modal-actions">
+      <button id="modalHide" type="button">Ocultar mensaje</button>
+      <button id="modalTimeout" type="button">Timeout</button>
+      <button id="modalBan" class="danger-button" type="button">Banear</button>
+    </div>
+    <p id="modalStatus" class="form-note"></p>
+  </section>
+</div>
+
+<script>
+  const room = document.querySelector(".chat-room");
+  const feed = document.querySelector("#chatMessages");
+  const form = document.querySelector("#chatForm");
+  const input = document.querySelector("#chatInput");
+  const errorBox = document.querySelector("#chatError");
+  const statusBox = document.querySelector("#roomStatus");
+  const usersBox = document.querySelector("#chatUsers");
+  const userCount = document.querySelector("#userCount");
+  const isAdmin = room.dataset.admin === "1";
+  const currentUsername = room.dataset.username || "";
+  const modal = document.querySelector("#adminModal");
+  const modalUserName = document.querySelector("#modalUserName");
+  const modalMessage = document.querySelector("#modalMessage");
+  const modalReason = document.querySelector("#modalReason");
+  const modalMinutes = document.querySelector("#modalMinutes");
+  const modalStatus = document.querySelector("#modalStatus");
+  let selectedMessage = null;
+  let lastId = 0;
+  let loading = false;
+  let autoFollow = true;
+  let unseenMessages = 0;
+
+  function isNearBottom() {
+    return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 56;
+  }
+
+  function scrollToLive() {
+    feed.scrollTop = feed.scrollHeight;
+    autoFollow = true;
+    unseenMessages = 0;
+    updateLiveButton();
+  }
+
+  function updateLiveButton() {
+    const button = document.querySelector("#liveChatButton");
+    if (!button) return;
+    button.hidden = autoFollow || unseenMessages === 0;
+    button.textContent = unseenMessages > 1
+      ? `${unseenMessages} mensajes nuevos - volver al vivo`
+      : "1 mensaje nuevo - volver al vivo";
+  }
+
+  function formatTime(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+
+  function escapeRegex(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function mentionsCurrentUser(body) {
+    if (!currentUsername || !body) return false;
+    const pattern = new RegExp(`(^|\\s)@${escapeRegex(currentUsername)}(?=$|\\s|[.,:;!?])`, "i");
+    return pattern.test(body);
+  }
+
+  function openModeration(data) {
+    if (!isAdmin) return;
+    selectedMessage = data;
+    modalUserName.textContent = `@${data.username}`;
+    modalMessage.textContent = data.body || "Gestionar usuario";
+    modalReason.value = "";
+    modalStatus.textContent = "";
+    modal.hidden = false;
+  }
+
+  function appendMessage(message, options = {}) {
+    if (document.querySelector(`[data-message-id="${message.id}"]`)) return;
+    const shouldFollow = options.forceScroll || autoFollow || isNearBottom();
+    const row = document.createElement("article");
+    row.className = `chat-line ${message.is_deleted ? "deleted" : ""}`;
+    if (!message.is_deleted && mentionsCurrentUser(message.body)) row.classList.add("mentioned");
+    row.dataset.messageId = message.id;
+    row.dataset.userId = message.user_id;
+    row.dataset.displayName = message.display_name;
+    row.dataset.username = message.username;
+    row.dataset.body = message.body;
+    const userTag = isAdmin
+      ? `<button class="name-chip" type="button" data-open-admin>${message.display_name}</button>`
+      : `<span class="name-chip">${message.display_name}</span>`;
+    row.innerHTML = `<time>${formatTime(message.created_at)}</time>${userTag}<p></p>`;
+    row.querySelector("p").textContent = message.body;
+    feed.appendChild(row);
+    if (shouldFollow) {
+      scrollToLive();
+    } else {
+      unseenMessages += 1;
+      autoFollow = false;
+      updateLiveButton();
+    }
+  }
+
+  async function loadMessages() {
+    if (loading) return;
+    loading = true;
+    try {
+      const response = await fetch(`/chat/messages?after_id=${lastId}`);
+      const data = await response.json();
+      if (data.visible_after_id > lastId) {
+        feed.innerHTML = "";
+        lastId = data.visible_after_id;
+      }
+      const firstLoad = lastId === 0;
+      for (const message of data.messages) {
+        appendMessage(message, { forceScroll: firstLoad });
+        lastId = Math.max(lastId, message.id);
+      }
+      statusBox.textContent = "En línea";
+    } catch {
+      statusBox.textContent = "Reconectando";
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function loadUsers() {
+    const response = await fetch("/chat/users");
+    const data = await response.json();
+    usersBox.innerHTML = "";
+    userCount.textContent = data.users.length;
+    for (const user of data.users) {
+      const item = document.createElement(isAdmin ? "button" : "div");
+      item.className = `chat-user ${user.is_admin ? "admin-user" : ""} ${user.is_banned ? "banned-user" : ""}`;
+      item.type = "button";
+      item.innerHTML = `<span></span><small>${user.is_admin ? "admin" : "participante"}</small>`;
+      item.querySelector("span").textContent = user.display_name;
+      if (isAdmin) {
+        item.addEventListener("dblclick", () => openModeration({
+          id: null,
+          userId: user.id,
+          displayName: user.username,
+          username: user.username,
+          body: "Gestionar usuario desde lista de sala"
+        }));
+      }
+      usersBox.appendChild(item);
+    }
+  }
+
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = input.value.trim();
+    if (!body) return;
+    errorBox.textContent = "";
+    const formData = new FormData();
+    formData.append("body", body);
+    input.value = "";
+    const response = await fetch("/chat/send", { method: "POST", body: formData });
+    const data = await response.json();
+    if (!data.ok) {
+      errorBox.textContent = data.error || "No se pudo enviar.";
+      input.value = body;
+      return;
+    }
+    appendMessage(data.message, { forceScroll: true });
+    lastId = Math.max(lastId, data.message.id);
+  });
+
+  feed.addEventListener("scroll", () => {
+    if (isNearBottom()) {
+      autoFollow = true;
+      unseenMessages = 0;
+    } else {
+      autoFollow = false;
+    }
+    updateLiveButton();
+  });
+
+  document.querySelector("#liveChatButton").addEventListener("click", scrollToLive);
+
+  feed.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-open-admin]");
+    if (!button) return;
+    const row = button.closest(".chat-line");
+    openModeration({
+      id: row.dataset.messageId,
+      userId: row.dataset.userId,
+      displayName: row.dataset.username,
+      username: row.dataset.username,
+      body: row.dataset.body
+    });
+  });
+
+  document.querySelector("#modalClose").addEventListener("click", () => {
+    modal.hidden = true;
+  });
+
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) modal.hidden = true;
+  });
+
+  async function postModeration(url, fields = {}) {
+    const formData = new FormData();
+    for (const [key, value] of Object.entries(fields)) formData.append(key, value);
+    const response = await fetch(url, { method: "POST", body: formData });
+    if (!response.ok) throw new Error("No se pudo aplicar la acción.");
+    return response.json();
+  }
+
+  document.querySelector("#modalHide").addEventListener("click", async () => {
+    if (!selectedMessage || !selectedMessage.id) {
+      modalStatus.textContent = "Elegí un mensaje para ocultar.";
+      return;
+    }
+    await postModeration(`/chat/${selectedMessage.id}/delete`);
+    const row = document.querySelector(`[data-message-id="${selectedMessage.id}"]`);
+    if (row) {
+      row.classList.add("deleted");
+      row.querySelector("p").textContent = "[mensaje moderado]";
+      row.dataset.body = "[mensaje moderado]";
+    }
+    modalStatus.textContent = "Mensaje ocultado.";
+  });
+
+  document.querySelector("#modalTimeout").addEventListener("click", async () => {
+    if (!selectedMessage) return;
+    await postModeration(`/chat/users/${selectedMessage.userId}/timeout`, {
+      minutes: modalMinutes.value || "15",
+      reason: modalReason.value || "Timeout desde chat"
+    });
+    modalStatus.textContent = "Timeout aplicado.";
+  });
+
+  document.querySelector("#modalBan").addEventListener("click", async () => {
+    if (!selectedMessage) return;
+    await postModeration(`/chat/users/${selectedMessage.userId}/ban`, {
+      reason: modalReason.value || "Baneado desde chat"
+    });
+    modalStatus.textContent = "Usuario baneado.";
+  });
+
+  const clearButton = document.querySelector("#clearChat");
+  if (clearButton) {
+    clearButton.addEventListener("click", async () => {
+      if (!confirm("Limpiar la sala para todos? Los logs quedan guardados.")) return;
+      const response = await postModeration("/chat/clear", { reason: "Sala limpiada desde chat" });
+      feed.innerHTML = "";
+      lastId = response.visible_after_id || lastId;
+      statusBox.textContent = "Sala limpia";
+    });
+  }
+
+  loadMessages();
+  loadUsers();
+  setInterval(loadMessages, 2500);
+  setInterval(loadUsers, 8000);
+</script>
+{% endblock %}

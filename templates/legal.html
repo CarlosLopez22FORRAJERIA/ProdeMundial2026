@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-title compact-title">
+  <div>
+    <p class="eyebrow">Información</p>
+    <h1>Reglas de convivencia</h1>
+    {% if legal_updated_at %}<p class="hint">Última actualización: {{ format_datetime(legal_updated_at) }}</p>{% endif %}
+  </div>
+</section>
+
+<section class="card section legal-card">
+  <div class="legal-content">
+    {% for paragraph in legal_paragraphs %}
+      <p>{{ paragraph }}</p>
+    {% endfor %}
+  </div>
+
+  {% if g.user and not accepted_current %}
+    <form class="legal-actions" method="post" action="{{ url_for('legal_accept') }}">
+      <button name="decision" value="accept">Leí y acepto</button>
+      <button class="secondary-button" name="decision" value="decline">No acepto</button>
+    </form>
+  {% elif g.user %}
+    <p class="accepted-note">Aceptado el {{ format_datetime(g.user.accepted_terms_at) }}.</p>
+  {% endif %}
+</section>
+{% endblock %}
