@@ -1141,6 +1141,7 @@ def create_app() -> Flask:
 
 def get_db() -> sqlite3.Connection:
     if "db" not in g:
+        current_database_path().parent.mkdir(parents=True, exist_ok=True)
         g.db = sqlite3.connect(current_database_path())
         g.db.row_factory = sqlite3.Row
     return g.db
@@ -1148,6 +1149,7 @@ def get_db() -> sqlite3.Connection:
 
 def ensure_runtime_schema(db: sqlite3.Connection) -> None:
     if not table_exists(db, "users"):
+        bootstrap_database(db)
         return
     ensure_column(db, "users", "last_seen_at", "text")
     ensure_column(db, "users", "is_debugger", "integer not null default 0")
@@ -1175,6 +1177,112 @@ def ensure_runtime_schema(db: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def bootstrap_database(db: sqlite3.Connection) -> None:
+    db.executescript(
+        """
+        create table if not exists users (
+            id integer primary key autoincrement,
+            username text not null unique,
+            display_name text not null,
+            password_hash text not null,
+            is_admin integer not null default 0,
+            is_debugger integer not null default 0,
+            is_banned integer not null default 0,
+            last_seen_at text,
+            chat_seen_at text,
+            force_password_change integer not null default 0,
+            accepted_terms_at text,
+            created_at text not null
+        );
+        create table if not exists stages (
+            stage_key text primary key,
+            label text not null,
+            sort_order integer not null,
+            is_bonus integer not null default 0,
+            is_locked integer not null default 0
+        );
+        create table if not exists games (
+            id integer primary key autoincrement,
+            external_id text unique,
+            stage_key text not null references stages(stage_key),
+            starts_at text not null,
+            home_team text not null,
+            away_team text not null,
+            home_score integer,
+            away_score integer,
+            result text
+        );
+        create table if not exists predictions (
+            id integer primary key autoincrement,
+            user_id integer not null references users(id),
+            game_id integer not null references games(id),
+            choice text not null,
+            home_goals integer,
+            away_goals integer,
+            updated_at text not null,
+            unique(user_id, game_id)
+        );
+        create table if not exists settings (
+            key text primary key,
+            value text not null
+        );
+        create table if not exists chat_messages (
+            id integer primary key autoincrement,
+            user_id integer not null references users(id),
+            body text not null,
+            created_at text not null,
+            is_deleted integer not null default 0
+        );
+        create table if not exists sanctions (
+            id integer primary key autoincrement,
+            user_id integer not null references users(id),
+            admin_id integer not null references users(id),
+            type text not null,
+            reason text not null,
+            expires_at text,
+            created_at text not null
+        );
+        create table if not exists audit_logs (
+            id integer primary key autoincrement,
+            user_id integer,
+            actor_id integer,
+            action text not null,
+            detail text,
+            ip_address text,
+            user_agent text,
+            created_at text not null
+        );
+        """
+    )
+    db.execute("create unique index if not exists idx_games_external_id on games(external_id) where external_id is not null")
+    for key, label, order, is_bonus in STAGES:
+        db.execute(
+            """
+            insert into stages (stage_key, label, sort_order, is_bonus, is_locked)
+            values (?, ?, ?, ?, 0)
+            on conflict(stage_key) do update set label = excluded.label, sort_order = excluded.sort_order, is_bonus = excluded.is_bonus
+            """,
+            (key, label, order, is_bonus),
+        )
+    for key, value in SETTINGS_DEFAULTS.items():
+        db.execute("insert or ignore into settings (key, value) values (?, ?)", (key, value))
+    seed_bracket_placeholders(db)
+    if not db.execute("select 1 from users where username = 'admin'").fetchone():
+        db.execute(
+            """
+            insert into users (username, display_name, password_hash, is_admin, is_banned, created_at)
+            values ('admin', 'Administrador', ?, 1, 0, ?)
+            """,
+            (generate_password_hash("admin123"), utc_now()),
+        )
+    if not db.execute("select 1 from games").fetchone():
+        db.executemany(
+            "insert into games (stage_key, starts_at, home_team, away_team) values (?, ?, ?, ?)",
+            SEED_GAMES,
+        )
+    db.commit()
 
 
 def table_exists(db: sqlite3.Connection, table: str) -> bool:
