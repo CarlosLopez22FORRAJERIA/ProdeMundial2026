@@ -83,6 +83,7 @@
   const modalReason = document.querySelector("#modalReason");
   const modalMinutes = document.querySelector("#modalMinutes");
   const modalStatus = document.querySelector("#modalStatus");
+  const csrf = document.querySelector('meta[name="csrf-token"]')?.content || "";
   let selectedMessage = null;
   let lastId = 0;
   let loading = false;
@@ -178,15 +179,21 @@
       }
       statusBox.textContent = "En línea";
     } catch {
-      statusBox.textContent = "Reconectando";
+      statusBox.textContent = navigator.onLine ? "Reconectando" : "Sin conexion";
     } finally {
       loading = false;
     }
   }
 
   async function loadUsers() {
-    const response = await fetch("/chat/users");
-    const data = await response.json();
+    let data;
+    try {
+      const response = await fetch("/chat/users");
+      data = await response.json();
+    } catch {
+      userCount.textContent = "-";
+      return;
+    }
     usersBox.innerHTML = "";
     userCount.textContent = data.users.length;
     for (const user of data.users) {
@@ -215,8 +222,16 @@
     errorBox.textContent = "";
     const formData = new FormData();
     formData.append("body", body);
+    formData.append("csrf_token", csrf);
     input.value = "";
-    const response = await fetch("/chat/send", { method: "POST", body: formData });
+    let response;
+    try {
+      response = await fetch("/chat/send", { method: "POST", body: formData, headers: { "X-CSRFToken": csrf } });
+    } catch {
+      errorBox.textContent = "No se pudo conectar con el servidor. Revisa internet e intenta de nuevo.";
+      input.value = body;
+      return;
+    }
     const data = await response.json();
     if (!data.ok) {
       errorBox.textContent = data.error || "No se pudo enviar.";
@@ -263,7 +278,13 @@
   async function postModeration(url, fields = {}) {
     const formData = new FormData();
     for (const [key, value] of Object.entries(fields)) formData.append(key, value);
-    const response = await fetch(url, { method: "POST", body: formData });
+    formData.append("csrf_token", csrf);
+    let response;
+    try {
+      response = await fetch(url, { method: "POST", body: formData, headers: { "X-CSRFToken": csrf } });
+    } catch {
+      throw new Error("No se pudo conectar con el servidor.");
+    }
     if (!response.ok) throw new Error("No se pudo aplicar la acción.");
     return response.json();
   }

@@ -11,15 +11,17 @@
   </div>
 </section>
 
-<section class="layout-main">
+<section class="layout-main" data-dashboard-main>
   <div class="card">
     <div class="card-head">
       <h2>Mis predicciones</h2>
       <span class="hint">Cargá el marcador: exacto suma 3 pts; resultado correcto suma 1 pt.</span>
     </div>
     <div class="match-list">
+      {% set pending = namespace(count=0) %}
       {% for game in games %}
         {% set prediction = predictions.get(game.id) %}
+        {% if not prediction %}{% set pending.count = pending.count + 1 %}{% endif %}
         <article class="match-row">
           <div class="match-info">
             <span class="date">{{ game.starts_at }}</span>
@@ -28,19 +30,32 @@
               <span>{{ game.home_team }} vs {{ game.away_team }}</span>
               <span class="side-flag right">{{ team_flag(game.away_team) }}</span>
             </strong>
-            {% if prediction %}<small>{{ prediction_label(game, prediction) }}</small>{% endif %}
+            <small class="prediction-summary" data-prediction-summary>{{ prediction_label(game, prediction) if prediction else "" }}</small>
           </div>
-          <form method="post" action="{{ url_for('predict', game_id=game.id) }}" class="score-pick">
-            <input aria-label="Goles {{ game.home_team }}" name="home_goals" type="number" min="0" max="30" inputmode="numeric" value="{{ prediction.home_goals if prediction and prediction.home_goals is not none else 0 }}">
+          <form method="post" action="{{ url_for('predict', game_id=game.id) }}" class="score-pick prediction-form {{ 'is-saved' if prediction else 'is-new' }}" data-prediction-form data-game-id="{{ game.id }}" data-home-team="{{ game.home_team }}" data-away-team="{{ game.away_team }}">
+            {% if not prediction %}
+              <input type="hidden" form="batch-predictions" name="game_id" value="{{ game.id }}">
+            {% endif %}
+            <input aria-label="Goles {{ game.home_team }}" name="{{ 'home_goals' if prediction else 'home_goals_' ~ game.id }}" type="number" min="0" max="30" inputmode="numeric" value="{{ prediction.home_goals if prediction and prediction.home_goals is not none else 0 }}" {% if not prediction %}form="batch-predictions"{% endif %}>
             <span class="score-separator">-</span>
-            <input aria-label="Goles {{ game.away_team }}" name="away_goals" type="number" min="0" max="30" inputmode="numeric" value="{{ prediction.away_goals if prediction and prediction.away_goals is not none else 0 }}">
-            <button>{{ "Actualizar" if prediction else "Confirmar" }}</button>
+            <input aria-label="Goles {{ game.away_team }}" name="{{ 'away_goals' if prediction else 'away_goals_' ~ game.id }}" type="number" min="0" max="30" inputmode="numeric" value="{{ prediction.away_goals if prediction and prediction.away_goals is not none else 0 }}" {% if not prediction %}form="batch-predictions"{% endif %}>
+            {% if prediction %}
+              <button type="submit">Actualizar</button>
+            {% else %}
+              <span class="row-save-state">Pendiente</span>
+            {% endif %}
           </form>
         </article>
       {% else %}
         <p class="empty">Todavía no hay partidos cargados para esta etapa.</p>
       {% endfor %}
     </div>
+    {% if pending.count %}
+      <form id="batch-predictions" class="batch-actions" method="post" action="{{ url_for('predict_batch') }}" data-batch-predictions>
+        <span class="batch-note">{{ pending.count }} partidos sin confirmar</span>
+        <button type="submit">Confirmar todos</button>
+      </form>
+    {% endif %}
   </div>
 
   <aside class="side-stack">

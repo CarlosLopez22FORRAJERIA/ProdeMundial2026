@@ -4,6 +4,7 @@ import os
 import json
 import random
 import re
+import secrets
 import shutil
 import sqlite3
 import unicodedata
@@ -11,6 +12,7 @@ import urllib.request
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
+from time import time
 
 from flask import (
     Flask,
@@ -37,6 +39,7 @@ DATABASE_DIR = Path(os.environ.get("PRODE_DATABASE_DIR", DATA_DIR / "databases")
 BACKUP_DIR = Path(os.environ.get("PRODE_BACKUP_DIR", DATA_DIR / "backups"))
 SECRET_KEY = os.environ.get("PRODE_SECRET_KEY", "dev-change-me")
 APP_NAME = "La Fija Mundialera"
+RATE_LIMITS: dict[str, list[float]] = {}
 DEFAULT_LEGAL_TEXT = """Este prode es privado y se organiza entre conocidos. La participación implica jugar de buena fe, respetar a los demás participantes y mantener un espíritu competitivo sano.
 
 La administración puede moderar el chat, aplicar advertencias, timeouts, suspensiones o expulsiones por mala conducta dentro de la app, en el chat o fuera del sistema si afecta al grupo.
@@ -248,7 +251,7 @@ TEAM_COUNTRY_CODES = {
     "curazao": "CW",
     "ecuador": "EC",
     "egipto": "EG",
-    "escocia": "GB",
+    "escocia": "GB-SCT",
     "espana": "ES",
     "estados unidos": "US",
     "francia": "FR",
@@ -284,10 +287,16 @@ TEAM_COUNTRY_CODES = {
 
 def create_app() -> Flask:
     app = Flask(__name__)
-    app.config.update(SECRET_KEY=SECRET_KEY)
+    app.config.update(
+        SECRET_KEY=SECRET_KEY,
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE="Lax",
+        SESSION_COOKIE_SECURE=os.environ.get("PRODE_COOKIE_SECURE", "0") == "1",
+    )
 
     @app.before_request
     def load_user() -> None:
+        session.setdefault("csrf_token", secrets.token_urlsafe(32))
         g.db = get_db()
         ensure_runtime_schema(g.db)
         g.database_path = current_database_path()
@@ -303,11 +312,28 @@ def create_app() -> Flask:
             if not accepted_current_terms(g.user):
                 return redirect(url_for("legal_info"))
 
+    @app.before_request
+    def protect_posts() -> None:
+        if request.method != "POST":
+            return
+        token = request.form.get("csrf_token") or request.headers.get("X-CSRFToken")
+        if not token or not secrets.compare_digest(token, session.get("csrf_token", "")):
+            if wants_json():
+                return jsonify({"ok": False, "message": "Sesion vencida. Actualiza la pagina e intenta de nuevo."}), 400
+            abort(400)
+
     @app.teardown_appcontext
     def close_db(_error: Exception | None) -> None:
         db = g.pop("db", None)
         if db is not None:
             db.close()
+
+    @app.after_request
+    def security_headers(response):
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        return response
 
     @app.template_filter("money")
     def money(value: object) -> str:
@@ -338,6 +364,9 @@ def create_app() -> Flask:
             g.database_name = current_database_name()
         username = request.form.get("username", "").strip().lower()
         password = request.form.get("password", "").strip()
+        if rate_limited(f"login:{client_ip()}:{username}", limit=8, window_seconds=300):
+            flash("Demasiados intentos. Espera unos minutos y proba de nuevo.", "error")
+            return redirect(url_for("index"))
         user = query_one("select * from users where username = ?", (username,))
         if not user or not check_password_hash(user["password_hash"], password):
             log_event("login_failed", f"Usuario: {username or '(vacio)'}")
@@ -471,36 +500,60 @@ def create_app() -> Flask:
         game = query_one("select * from games where id = ?", (game_id,))
         if not game:
             abort(404)
-        stage = query_one("select * from stages where stage_key = ?", (game["stage_key"],))
-        if stage["is_locked"]:
-            flash("Esta etapa ya esta bloqueada.", "error")
-            return redirect(url_for("dashboard"))
         try:
             home_goals = int(request.form.get("home_goals", ""))
             away_goals = int(request.form.get("away_goals", ""))
         except ValueError:
-            flash("Los goles tienen que ser numeros.", "error")
-            return redirect(url_for("dashboard"))
-        if not (0 <= home_goals <= 30 and 0 <= away_goals <= 30):
-            flash("Los goles tienen que estar entre 0 y 30.", "error")
-            return redirect(url_for("dashboard"))
-        choice = result_from_score(home_goals, away_goals)
-        now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-        g.db.execute(
-            """
-            insert into predictions (user_id, game_id, choice, home_goals, away_goals, updated_at)
-            values (?, ?, ?, ?, ?, ?)
-            on conflict(user_id, game_id) do update set
-                choice = excluded.choice,
-                home_goals = excluded.home_goals,
-                away_goals = excluded.away_goals,
-                updated_at = excluded.updated_at
-            """,
-            (g.user["id"], game_id, choice, home_goals, away_goals, now),
-        )
-        log_event("prediction_save", f"{game['home_team']} vs {game['away_team']}: {home_goals}-{away_goals}")
+            return prediction_error("Los goles tienen que ser numeros.")
+        error = save_prediction(game, home_goals, away_goals)
+        if error:
+            return prediction_error(error)
         g.db.commit()
+        if wants_json():
+            return jsonify(
+                {
+                    "ok": True,
+                    "message": "Prediccion guardada.",
+                    "game_id": game_id,
+                    "label": prediction_text(game, home_goals, away_goals),
+                }
+            )
         flash("Prediccion guardada.", "ok")
+        return redirect(url_for("dashboard"))
+
+    @app.route("/predictions/batch", methods=["POST"])
+    @login_required
+    def predict_batch():
+        saved = 0
+        errors = []
+        saved_predictions = {}
+        game_ids = request.form.getlist("game_id")
+        for raw_game_id in game_ids:
+            try:
+                game_id = int(raw_game_id)
+                home_goals = int(request.form.get(f"home_goals_{game_id}", ""))
+                away_goals = int(request.form.get(f"away_goals_{game_id}", ""))
+            except ValueError:
+                errors.append("Hay goles con formato invalido.")
+                continue
+            game = query_one("select * from games where id = ?", (game_id,))
+            if not game:
+                errors.append(f"Partido {game_id} no existe.")
+                continue
+            error = save_prediction(game, home_goals, away_goals)
+            if error:
+                errors.append(error)
+                continue
+            saved += 1
+            saved_predictions[game_id] = prediction_text(game, home_goals, away_goals)
+        if saved:
+            g.db.commit()
+        message = f"{saved} predicciones guardadas." if saved != 1 else "1 prediccion guardada."
+        if wants_json():
+            return jsonify({"ok": not errors, "saved": saved, "message": message, "errors": errors, "predictions": saved_predictions}), (400 if errors and not saved else 200)
+        flash(message, "ok" if saved else "error")
+        for error in errors[:3]:
+            flash(error, "error")
         return redirect(url_for("dashboard"))
 
     @app.route("/standings")
@@ -574,6 +627,8 @@ def create_app() -> Flask:
         active_timeout = current_chat_timeout()
         if active_timeout:
             return jsonify({"ok": False, "error": "Tenes un timeout activo para escribir en el chat."}), 403
+        if rate_limited(f"chat:{g.user['id']}", limit=12, window_seconds=20):
+            return jsonify({"ok": False, "error": "Estas enviando mensajes muy rapido. Espera unos segundos."}), 429
         body = request.form.get("body", "").strip()
         if not body:
             return jsonify({"ok": False, "error": "El mensaje esta vacio."}), 400
@@ -672,6 +727,7 @@ def create_app() -> Flask:
             databases=available_databases(),
             current_database=current_database_name(),
             is_primary_database=is_primary_database(),
+            backup_status=backup_status(),
             sanctions=query_all(
                 """
                 select sanctions.*, users.username
@@ -680,6 +736,48 @@ def create_app() -> Flask:
                 """
             ),
         )
+
+    @app.route("/admin/backup/json", methods=["POST"])
+    @admin_required
+    def admin_backup_json():
+        path = create_backup("full")
+        log_event("admin_backup_json", f"Backup JSON descargado: {path.name}")
+        g.db.commit()
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @app.route("/admin/backup/sqlite", methods=["POST"])
+    @admin_required
+    def admin_backup_sqlite():
+        g.db.commit()
+        path = create_sqlite_backup()
+        log_event("admin_backup_sqlite", f"Backup SQLite descargado: {path.name}")
+        g.db.commit()
+        return send_file(path, as_attachment=True, download_name=path.name)
+
+    @app.route("/admin/backup/restore", methods=["POST"])
+    @admin_required
+    def admin_restore_backup():
+        confirmation = request.form.get("confirmation", "").strip().upper()
+        uploaded = request.files.get("backup_file")
+        if confirmation != "RESTAURAR":
+            flash("Para restaurar escribi RESTAURAR.", "error")
+            return redirect(url_for("admin"))
+        if not uploaded or not uploaded.filename:
+            flash("Selecciona un archivo de backup SQLite.", "error")
+            return redirect(url_for("admin"))
+        if not uploaded.filename.lower().endswith((".sqlite3", ".db", ".sqlite")):
+            flash("Solo se puede restaurar un backup SQLite.", "error")
+            return redirect(url_for("admin"))
+        try:
+            before_path = create_sqlite_backup(prefix="pre-restore")
+            restore_sqlite_backup(uploaded)
+            get_db()
+            log_event("admin_backup_restore", f"Restauro backup {uploaded.filename}; previo guardado en {before_path.name}")
+            g.db.commit()
+            flash("Backup restaurado. Se guardo una copia previa por seguridad.", "ok")
+        except ValueError as exc:
+            flash(str(exc), "error")
+        return redirect(url_for("admin"))
 
     @app.route("/admin/users", methods=["POST"])
     @admin_required
@@ -1035,6 +1133,7 @@ def create_app() -> Flask:
             "current_page_label": current_page_label,
             "accepted_current_terms": accepted_current_terms,
             "format_datetime": format_datetime,
+            "csrf_token": lambda: session.get("csrf_token", ""),
         }
 
     return app
@@ -1203,6 +1302,20 @@ def client_agent() -> str:
     return (request.headers.get("User-Agent") or "-")[:300]
 
 
+def rate_limited(key: str, limit: int, window_seconds: int) -> bool:
+    now = time()
+    window_start = now - window_seconds
+    attempts = [stamp for stamp in RATE_LIMITS.get(key, []) if stamp >= window_start]
+    limited = len(attempts) >= limit
+    attempts.append(now)
+    RATE_LIMITS[key] = attempts
+    if len(RATE_LIMITS) > 2000:
+        for old_key, values in list(RATE_LIMITS.items())[:500]:
+            if not values or values[-1] < window_start:
+                RATE_LIMITS.pop(old_key, None)
+    return limited
+
+
 def log_event(action: str, detail: str = "", user_id: int | None = None) -> None:
     actor_id = g.user["id"] if getattr(g, "user", None) else None
     if user_id is None:
@@ -1241,6 +1354,41 @@ def audit_groups(limit_per_user: int = 12) -> list[dict]:
         if len(group["logs"]) < limit_per_user:
             group["logs"].append(row)
     return sorted(grouped.values(), key=lambda item: item["last_at"], reverse=True)
+
+
+def wants_json() -> bool:
+    return request.headers.get("X-Requested-With") == "fetch" or "application/json" in request.headers.get("Accept", "")
+
+
+def prediction_error(message: str):
+    if wants_json():
+        return jsonify({"ok": False, "message": message}), 400
+    flash(message, "error")
+    return redirect(url_for("dashboard"))
+
+
+def save_prediction(game: sqlite3.Row, home_goals: int, away_goals: int) -> str | None:
+    stage = query_one("select * from stages where stage_key = ?", (game["stage_key"],))
+    if stage["is_locked"]:
+        return "Esta etapa ya esta bloqueada."
+    if not (0 <= home_goals <= 30 and 0 <= away_goals <= 30):
+        return "Los goles tienen que estar entre 0 y 30."
+    choice = result_from_score(home_goals, away_goals)
+    now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    g.db.execute(
+        """
+        insert into predictions (user_id, game_id, choice, home_goals, away_goals, updated_at)
+        values (?, ?, ?, ?, ?, ?)
+        on conflict(user_id, game_id) do update set
+            choice = excluded.choice,
+            home_goals = excluded.home_goals,
+            away_goals = excluded.away_goals,
+            updated_at = excluded.updated_at
+        """,
+        (g.user["id"], game["id"], choice, home_goals, away_goals, now),
+    )
+    log_event("prediction_save", f"{game['home_team']} vs {game['away_team']}: {home_goals}-{away_goals}")
+    return None
 
 
 def blank_to_none(value: str | None) -> int | None:
@@ -1329,6 +1477,10 @@ def prediction_label(game: sqlite3.Row, prediction: sqlite3.Row | None) -> str:
     if prediction["home_goals"] is not None and prediction["away_goals"] is not None:
         score = f" {prediction['home_goals']}-{prediction['away_goals']}"
     return f"{choice_label(game, prediction['choice'])}{score}"
+
+
+def prediction_text(game: sqlite3.Row, home_goals: int, away_goals: int) -> str:
+    return f"{choice_label(game, result_from_score(home_goals, away_goals))} {home_goals}-{away_goals}"
 
 
 def prediction_status(game: sqlite3.Row, prediction: sqlite3.Row | None) -> str:
@@ -1599,7 +1751,7 @@ def seed_fake_results(stage_key: str) -> int:
 
 
 def create_backup(kind: str, stage_key: str | None = None) -> Path:
-    BACKUP_DIR.mkdir(exist_ok=True)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     if kind == "full":
         data = {table: dump_table(table) for table in ["users", "stages", "games", "predictions", "settings", "chat_messages", "sanctions"]}
@@ -1628,6 +1780,80 @@ def create_backup(kind: str, stage_key: str | None = None) -> Path:
     path = BACKUP_DIR / f"{timestamp}-{kind}.json"
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def create_sqlite_backup(prefix: str | None = None) -> Path:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    db_name = current_database_name()
+    label = f"{prefix}-" if prefix else ""
+    path = BACKUP_DIR / f"{timestamp}-{label}{db_name}-database.sqlite3"
+    source = sqlite3.connect(current_database_path())
+    try:
+        target = sqlite3.connect(path)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+    finally:
+        source.close()
+    return path
+
+
+def restore_sqlite_backup(uploaded) -> None:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    temp_path = BACKUP_DIR / f"restore-upload-{secrets.token_hex(8)}.sqlite3"
+    uploaded.save(temp_path)
+    try:
+        validate_sqlite_backup(temp_path)
+        target = current_database_path()
+        g.db.close()
+        g.pop("db", None)
+        shutil.copy2(temp_path, target)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def validate_sqlite_backup(path: Path) -> None:
+    required_tables = {"users", "stages", "games", "predictions", "settings"}
+    try:
+        db = sqlite3.connect(path)
+        try:
+            integrity = db.execute("pragma integrity_check").fetchone()[0]
+            if integrity != "ok":
+                raise ValueError("El archivo SQLite no paso el control de integridad.")
+            tables = {row[0] for row in db.execute("select name from sqlite_master where type = 'table'")}
+        finally:
+            db.close()
+    except sqlite3.DatabaseError as exc:
+        raise ValueError("El archivo no parece ser una base SQLite valida.") from exc
+    missing = required_tables - tables
+    if missing:
+        raise ValueError(f"El backup no corresponde a esta app. Faltan tablas: {', '.join(sorted(missing))}.")
+
+
+def backup_status(limit: int = 5) -> dict:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    files = sorted((path for path in BACKUP_DIR.iterdir() if path.is_file()), key=lambda item: item.stat().st_mtime, reverse=True)
+    return {
+        "total": len(files),
+        "latest": [
+            {
+                "name": path.name,
+                "size": human_size(path.stat().st_size),
+                "created": datetime.fromtimestamp(path.stat().st_mtime).strftime("%d/%m/%Y %H:%M"),
+            }
+            for path in files[:limit]
+        ],
+    }
+
+
+def human_size(size: int) -> str:
+    value = float(size)
+    for unit in ["B", "KB", "MB", "GB"]:
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
 
 
 def dump_table(table: str) -> list[dict]:

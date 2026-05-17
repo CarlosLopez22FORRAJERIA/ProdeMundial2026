@@ -9,6 +9,8 @@ services:
         value: /var/data
       - key: PRODE_SECRET_KEY
         generateValue: true
+      - key: PRODE_COOKIE_SECURE
+        value: "1"
     disk:
       name: prode-data
       mountPath: /var/data
