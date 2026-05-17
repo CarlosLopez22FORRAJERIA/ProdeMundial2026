@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+prode.sqlite3
+databases/
+backups/
+_tmp_verify*/
+_render_data_test/

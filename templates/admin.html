@@ -9,11 +9,47 @@
 
 <section class="admin-grid">
   <details class="card admin-block" open>
+    <summary>Seguridad y respaldos</summary>
+    <div class="debug-grid">
+      <form class="debug-card" method="post" action="{{ url_for('admin_backup_sqlite') }}">
+        <strong>Backup completo</strong>
+        <span class="hint">Copia SQLite lista para restaurar toda la base activa.</span>
+        <button>Descargar base</button>
+      </form>
+      <form class="debug-card" method="post" action="{{ url_for('admin_backup_json') }}">
+        <strong>Backup legible</strong>
+        <span class="hint">JSON con usuarios, partidos, picks, chat y configuracion.</span>
+        <button>Descargar JSON</button>
+      </form>
+      <form class="debug-card" method="post" action="{{ url_for('admin_restore_backup') }}" enctype="multipart/form-data" onsubmit="return confirm('Restaurar este backup reemplaza la base activa. Continuar?')">
+        <strong>Restaurar backup</strong>
+        <span class="hint">Subi un SQLite descargado. Antes de pisar, se guarda una copia previa.</span>
+        <input name="backup_file" type="file" accept=".sqlite3,.sqlite,.db" required>
+        <input name="confirmation" placeholder="Escribi RESTAURAR" required>
+        <button class="danger-button">Restaurar base</button>
+      </form>
+      <div class="debug-card">
+        <strong>Ultimos respaldos</strong>
+        {% if backup_status.latest %}
+          {% for backup in backup_status.latest %}
+            <span class="hint">{{ backup.created }} · {{ backup.name }} · {{ backup.size }}</span>
+          {% endfor %}
+        {% else %}
+          <span class="hint">Todavia no hay respaldos descargados.</span>
+        {% endif %}
+      </div>
+    </div>
+  </details>
+
+  <details class="card admin-block" open>
     <summary>Usuarios</summary>
     <form class="inline-form" method="post" action="{{ url_for('admin_create_user') }}">
       <input name="username" placeholder="Usuario" required>
       <input name="display_name" placeholder="Nombre y apellido" required>
-      <input name="password" placeholder="Clave" required>
+      <span class="password-field">
+        <input name="password" type="password" placeholder="Clave" required>
+        <button type="button" class="password-toggle" data-toggle-password aria-label="Mostrar clave"><span>Mostrar clave</span></button>
+      </span>
       <label class="check"><input type="checkbox" name="is_admin"> Admin</label>
       <label class="check"><input type="checkbox" name="is_debugger"> Debug</label>
       <label class="check"><input type="checkbox" name="force_password_change" checked> Cambia clave</label>
@@ -42,7 +78,10 @@
             <form class="user-edit-form" method="post" action="{{ url_for('admin_update_user', user_id=user.id) }}">
               <input name="username" value="{{ user.username }}" aria-label="Usuario">
               <input name="display_name" value="{{ user.display_name }}" aria-label="Nombre y apellido">
-              <input name="password" placeholder="Nueva clave" aria-label="Nueva clave">
+              <span class="password-field">
+                <input name="password" type="password" placeholder="Nueva clave" aria-label="Nueva clave">
+                <button type="button" class="password-toggle" data-toggle-password aria-label="Mostrar clave"><span>Mostrar clave</span></button>
+              </span>
               <select name="role" aria-label="Rol">
                 <option value="user" {% if not user.is_admin %}selected{% endif %}>Usuario</option>
                 <option value="admin" {% if user.is_admin %}selected{% endif %}>Admin</option>

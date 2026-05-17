@@ -15,7 +15,12 @@
     </div>
     <input type="hidden" name="database_name" value="{{ current_database }}">
     <label>Usuario <input name="username" autocomplete="username" required></label>
-    <label>Clave <input name="password" type="password" autocomplete="current-password" required></label>
+    <label>Clave
+      <span class="password-field">
+        <input name="password" type="password" autocomplete="current-password" required>
+        <button type="button" class="password-toggle" data-toggle-password aria-label="Mostrar clave"><span>Mostrar clave</span></button>
+      </span>
+    </label>
     <button type="submit">Entrar</button>
   </form>
 </section>

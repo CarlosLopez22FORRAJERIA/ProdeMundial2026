@@ -3,7 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>{{ app_name }}{% if current_page_label() %} - {{ current_page_label() }}{% endif %}</title>
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg', v=asset_version('favicon.svg')) }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css', v=asset_version('styles.css')) }}">
 </head>
 <body>
@@ -28,6 +30,7 @@
     {% endif %}
   </header>
   <main class="shell">
+    <div id="networkStatus" class="network-status" hidden>No se pudo conectar con el servidor.</div>
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         <div class="flashes">
@@ -39,5 +42,222 @@
     {% endwith %}
     {% block content %}{% endblock %}
   </main>
+  <script>
+    function csrfToken() {
+      const meta = document.querySelector('meta[name="csrf-token"]');
+      return meta ? meta.content : "";
+    }
+
+    function showNetworkStatus(message, persistent = false) {
+      const box = document.querySelector("#networkStatus");
+      if (!box) return;
+      box.textContent = message;
+      box.hidden = false;
+      if (!persistent) {
+        clearTimeout(showNetworkStatus.timer);
+        showNetworkStatus.timer = setTimeout(() => { box.hidden = true; }, 4200);
+      }
+    }
+
+    function hideNetworkStatus() {
+      const box = document.querySelector("#networkStatus");
+      if (box) box.hidden = true;
+    }
+
+    window.addEventListener("offline", () => {
+      showNetworkStatus("Sin conexion. Podés ver la pantalla, pero no se van a guardar cambios hasta reconectar.", true);
+    });
+
+    window.addEventListener("online", () => {
+      showNetworkStatus("Conexion recuperada.", false);
+    });
+
+    function ensureFormCsrf(scope = document) {
+      scope.querySelectorAll('form[method="post"], form[method="POST"]').forEach((form) => {
+        if (form.querySelector('input[name="csrf_token"]')) return;
+        const input = document.createElement("input");
+        input.type = "hidden";
+        input.name = "csrf_token";
+        input.value = csrfToken();
+        form.appendChild(input);
+      });
+    }
+
+    async function submitFormJson(form) {
+      let response;
+      try {
+        response = await fetch(form.action, {
+          method: form.method || "POST",
+          body: new FormData(form),
+          headers: { "Accept": "application/json", "X-Requested-With": "fetch", "X-CSRFToken": csrfToken() },
+        });
+      } catch {
+        showNetworkStatus("No se pudo establecer conexion con el servidor. Revisa internet e intenta de nuevo.", true);
+        throw new Error("Sin conexion");
+      }
+      hideNetworkStatus();
+      const data = await response.json().catch(() => ({ ok: false, message: "No se pudo guardar." }));
+      if (!response.ok || data.ok === false) throw new Error(data.message || "No se pudo guardar.");
+      return data;
+    }
+
+    function initPasswordToggles(scope = document) {
+      scope.querySelectorAll("[data-toggle-password]").forEach((button) => {
+        if (button.dataset.bound === "1") return;
+        button.dataset.bound = "1";
+        button.addEventListener("click", () => {
+          const field = button.closest(".password-field");
+          const input = field ? field.querySelector("input") : null;
+          if (!input) return;
+          const showing = input.type === "text";
+          input.type = showing ? "password" : "text";
+          button.classList.toggle("is-visible", !showing);
+          button.setAttribute("aria-label", showing ? "Mostrar clave" : "Ocultar clave");
+          const label = button.querySelector("span");
+          if (label) label.textContent = showing ? "Mostrar clave" : "Ocultar clave";
+        });
+      });
+    }
+
+    async function refreshDashboardPanels() {
+      if (!document.querySelector("[data-dashboard-main]")) return;
+      const scrollY = window.scrollY;
+      const refreshUrl = new URL(window.location.href);
+      refreshUrl.searchParams.set("_", Date.now().toString());
+      const response = await fetch(refreshUrl.toString(), {
+        cache: "no-store",
+        headers: { "X-Requested-With": "fetch", "Cache-Control": "no-cache" },
+      });
+      if (!response.ok) return;
+      const html = await response.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      ["[data-dashboard-main]", ".page-title"].forEach((selector) => {
+        const current = document.querySelector(selector);
+        const fresh = doc.querySelector(selector);
+        if (current && fresh) current.replaceWith(fresh);
+      });
+      initInteractiveControls(document);
+      window.scrollTo({ top: scrollY, behavior: "instant" });
+    }
+
+    function updatePredictionSummary(form, label) {
+      const row = form.closest(".match-row");
+      const summary = row ? row.querySelector("[data-prediction-summary]") : null;
+      if (summary && label) summary.textContent = label;
+    }
+
+    function predictionLabelFromInputs(form) {
+      const gameId = form.dataset.gameId;
+      const homeInput = form.querySelector(`[name="home_goals_${gameId}"], [name="home_goals"]`);
+      const awayInput = form.querySelector(`[name="away_goals_${gameId}"], [name="away_goals"]`);
+      if (!homeInput || !awayInput) return "";
+      const homeGoals = Number.parseInt(homeInput.value, 10);
+      const awayGoals = Number.parseInt(awayInput.value, 10);
+      if (Number.isNaN(homeGoals) || Number.isNaN(awayGoals)) return "";
+      let winner = "Empate";
+      if (homeGoals > awayGoals) winner = form.dataset.homeTeam || "Local";
+      if (awayGoals > homeGoals) winner = form.dataset.awayTeam || "Visitante";
+      return `${winner} ${homeGoals}-${awayGoals}`;
+    }
+
+    function forcePredictionSummary(form, label = "") {
+      updatePredictionSummary(form, label || predictionLabelFromInputs(form));
+    }
+
+    function markPredictionSaved(form) {
+      const gameId = form.dataset.gameId;
+      const home = form.querySelector(`[name="home_goals_${gameId}"], [name="home_goals"]`);
+      const away = form.querySelector(`[name="away_goals_${gameId}"], [name="away_goals"]`);
+      const state = form.querySelector(".row-save-state");
+      form.classList.remove("is-new");
+      form.classList.add("is-saved");
+      if (home) {
+        home.name = "home_goals";
+        home.removeAttribute("form");
+      }
+      if (away) {
+        away.name = "away_goals";
+        away.removeAttribute("form");
+      }
+      form.querySelectorAll('input[type="hidden"][name="game_id"]').forEach((input) => input.remove());
+      if (state) {
+        const button = document.createElement("button");
+        button.type = "submit";
+        button.textContent = "Actualizar";
+        state.replaceWith(button);
+      }
+    }
+
+    function initPredictionForms(scope = document) {
+      scope.querySelectorAll("[data-prediction-form]").forEach((form) => {
+        if (form.dataset.bound === "1") return;
+        form.dataset.bound = "1";
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          if (form.classList.contains("is-new")) return;
+          const button = form.querySelector('button[type="submit"]');
+          const original = button ? button.textContent : "";
+          if (button) {
+            button.disabled = true;
+            button.textContent = "Guardando";
+          }
+          try {
+            const data = await submitFormJson(form);
+            forcePredictionSummary(form, data.label || predictionLabelFromInputs(form));
+            if (button) button.textContent = "Guardado";
+            await refreshDashboardPanels();
+          } catch (error) {
+            if (button) button.textContent = error.message;
+            setTimeout(() => {
+              if (button) button.textContent = original || "Actualizar";
+            }, 1600);
+          } finally {
+            if (button) button.disabled = false;
+          }
+        });
+      });
+    }
+
+    function initBatchPredictions(scope = document) {
+      const batchForm = scope.querySelector("[data-batch-predictions]");
+      if (!batchForm || batchForm.dataset.bound === "1") return;
+      batchForm.dataset.bound = "1";
+      batchForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const button = batchForm.querySelector('button[type="submit"]');
+        const note = batchForm.querySelector(".batch-note");
+        if (button) {
+          button.disabled = true;
+          button.textContent = "Guardando";
+        }
+        try {
+          const data = await submitFormJson(batchForm);
+          document.querySelectorAll("[data-prediction-form].is-new").forEach((form) => {
+            const label = data.predictions ? data.predictions[form.dataset.gameId] : "";
+            forcePredictionSummary(form, label);
+            markPredictionSaved(form);
+          });
+          if (note) note.textContent = data.message || "Predicciones guardadas.";
+          if (button) button.textContent = "Guardado";
+          await refreshDashboardPanels();
+        } catch (error) {
+          if (note) note.textContent = error.message;
+          if (button) {
+            button.disabled = false;
+            button.textContent = "Confirmar todos";
+          }
+        }
+      });
+    }
+
+    function initInteractiveControls(scope = document) {
+      ensureFormCsrf(scope);
+      initPasswordToggles(scope);
+      initPredictionForms(scope);
+      initBatchPredictions(scope);
+    }
+
+    initInteractiveControls(document);
+  </script>
 </body>
 </html>
