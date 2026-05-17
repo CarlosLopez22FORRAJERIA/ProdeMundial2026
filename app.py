@@ -1149,9 +1149,18 @@ def get_db() -> sqlite3.Connection:
 def ensure_runtime_schema(db: sqlite3.Connection) -> None:
     if not table_exists(db, "users"):
         return
+    ensure_column(db, "users", "last_seen_at", "text")
+    ensure_column(db, "users", "is_debugger", "integer not null default 0")
+    ensure_column(db, "users", "is_banned", "integer not null default 0")
     ensure_column(db, "users", "force_password_change", "integer not null default 0")
     ensure_column(db, "users", "accepted_terms_at", "text")
     ensure_column(db, "users", "chat_seen_at", "text")
+    if table_exists(db, "games"):
+        ensure_column(db, "games", "external_id", "text")
+        db.execute("create unique index if not exists idx_games_external_id on games(external_id) where external_id is not null")
+    if table_exists(db, "predictions"):
+        ensure_column(db, "predictions", "home_goals", "integer")
+        ensure_column(db, "predictions", "away_goals", "integer")
     db.execute(
         """
         create table if not exists audit_logs (
