@@ -8,42 +8,74 @@
 </section>
 
 {% for stage in stages %}
-  <details class="card section fixture-stage" {% if stage.stage_key == first_open_stage_key %}open{% endif %}>
+  {% set is_current_playing = stage.stage_key == current_playing_stage_key %}
+  {% set is_locked_played = stage.stage_key in locked_played_stage_keys %}
+  <details class="card section fixture-stage {{ 'current-playing-stage' if is_current_playing else '' }} {{ 'locked-played-stage' if is_locked_played else '' }}" {% if stage.stage_key == default_fixture_stage_key and not is_locked_played %}open{% endif %}>
     <summary class="card-head">
       <h2>{{ stage.label }}</h2>
       <span>
+        {% if is_current_playing %}
+          <span class="live-stage-pill">Partidos actuales</span>
+        {% endif %}
         <span class="fixture-count">{{ games_by_stage[stage.stage_key]|length }} partidos</span>
-        <span class="status-pill {{ 'locked' if stage.is_locked else '' }}">{{ "Bloqueada" if stage.is_locked else "Abierta" }}</span>
+        <span class="status-pill {{ 'locked' if stage.is_locked else '' }}">{{ "Jugada" if is_locked_played else "Bloqueada" if stage.is_locked else "Abierta" }}</span>
       </span>
     </summary>
     <div class="fixture-list">
+      {% if games_by_stage[stage.stage_key] %}
+        <div class="fixture-head" aria-hidden="true">
+          <span>Horario</span>
+          <span class="fixture-head-match">Partido</span>
+          <span>Estado / Mi prode</span>
+        </div>
+      {% endif %}
       {% for game in games_by_stage[stage.stage_key] %}
         {% set prediction = predictions.get(game.id) %}
         {% set actual = game_result(game) %}
+        {% set is_live_result = game_is_live(game) %}
         {% set status = prediction_status(game, prediction) %}
         {% set status_text = prediction_status_label(game, prediction) %}
-        {% set tooltip_main = "Mi prode: " ~ prediction_label(game, prediction) if prediction else "Resultado: " ~ (game.home_score if game.home_score is not none else "-") ~ "-" ~ (game.away_score if game.away_score is not none else "-") %}
-        {% set tooltip_status = status_text if prediction else "Final: " ~ choice_label(game, actual) if actual else "" %}
-        {% set has_tooltip = prediction or actual %}
-        <article class="fixture-row {{ 'has-prediction' if prediction else '' }} {{ 'is-finished' if actual else '' }}">
-          <span class="date">{{ game.starts_at }}</span>
+        {% set fixture_state = fixture_states[stage.stage_key].get(game.id) %}
+        {% set score_text = (game.home_score if game.home_score is not none else "-") ~ "-" ~ (game.away_score if game.away_score is not none else "-") %}
+        {% set went_to_penalties = game_went_to_penalties(game) %}
+        {% if prediction %}
+          {% set tooltip_main = "Mi prode: " ~ prediction_label(game, prediction) %}
+          {% set tooltip_status = status_text %}
+        {% elif actual %}
+          {% set tooltip_main = "Resultado: " ~ score_text %}
+          {% set tooltip_status = "Final: " ~ result_detail_label(game) %}
+        {% elif is_live_result %}
+          {% set tooltip_main = "Parcial: " ~ score_text %}
+          {% set tooltip_status = "No finalizado" %}
+        {% else %}
+          {% set tooltip_main = "" %}
+          {% set tooltip_status = "" %}
+        {% endif %}
+        {% set has_tooltip = prediction or actual or is_live_result %}
+        <article class="fixture-row fixture-status-row {{ 'status-' ~ fixture_state.key if fixture_state else '' }} {{ 'has-prediction' if prediction else '' }} {{ 'is-finished' if actual else '' }} {{ 'is-live' if is_live_result else '' }}" data-game-id="{{ game.id }}" data-result-status="{{ game.result_status }}">
+          <span class="date">{{ format_game_datetime(game.starts_at) }}</span>
           <span
             class="fixture-team {{ 'actual-marker' if actual == 'home' else '' }} {{ 'predicted prediction-' ~ status if prediction and prediction.choice == 'home' else '' }}"
-            {% if has_tooltip %}tabindex="0" title="{{ tooltip_main }} - {{ tooltip_status }}" data-tip="{{ tooltip_main }}" data-tip-status="{{ tooltip_status }}"{% endif %}
+            {% if has_tooltip %}tabindex="0" data-tip="{{ tooltip_main }}" data-tip-status="{{ tooltip_status }}"{% endif %}
           >
             {{ team_label(game.home_team) }}
           </span>
           <span
             class="score {{ 'actual-marker' if actual == 'draw' else '' }} {{ 'predicted prediction-' ~ status if prediction and prediction.choice == 'draw' else '' }}"
-            {% if has_tooltip %}tabindex="0" title="{{ tooltip_main }} - {{ tooltip_status }}" data-tip="{{ tooltip_main }}" data-tip-status="{{ tooltip_status }}"{% endif %}
+            {% if has_tooltip %}tabindex="0" data-tip="{{ tooltip_main }}" data-tip-status="{{ tooltip_status }}"{% endif %}
           >
             {{ game.home_score if game.home_score is not none else "-" }} : {{ game.away_score if game.away_score is not none else "-" }}
+            {% if went_to_penalties %}<small class="score-extra">(pen.)</small>{% endif %}
           </span>
           <span
             class="fixture-team away {{ 'actual-marker' if actual == 'away' else '' }} {{ 'predicted prediction-' ~ status if prediction and prediction.choice == 'away' else '' }}"
-            {% if has_tooltip %}tabindex="0" title="{{ tooltip_main }} - {{ tooltip_status }}" data-tip="{{ tooltip_main }}" data-tip-status="{{ tooltip_status }}"{% endif %}
+            {% if has_tooltip %}tabindex="0" data-tip="{{ tooltip_main }}" data-tip-status="{{ tooltip_status }}"{% endif %}
           >
             {{ team_label(game.away_team) }}
+          </span>
+          <span class="fixture-status-meta {{ 'has-user-prediction prediction-' ~ status if prediction else 'no-user-prediction' }}">
+            <strong class="fixture-status-pill {{ fixture_state.key if fixture_state else '' }}">{{ fixture_state.label if fixture_state else game_status_label(game) }}</strong>
+            <small class="fixture-prediction-text" {% if prediction %}tabindex="0" data-tip="{{ tooltip_main }}" data-tip-status="{{ tooltip_status }}"{% endif %}>{% if prediction %}{{ prediction_label(game, prediction) }}{% else %}Sin prode{% endif %}</small>
           </span>
         </article>
       {% else %}

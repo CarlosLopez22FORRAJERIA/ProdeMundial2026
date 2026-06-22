@@ -7,12 +7,14 @@ import re
 import secrets
 import shutil
 import sqlite3
+import threading
 import unicodedata
+import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
-from time import time
+from time import sleep, time
 
 from flask import (
     Flask,
@@ -40,6 +42,8 @@ BACKUP_DIR = Path(os.environ.get("PRODE_BACKUP_DIR", DATA_DIR / "backups"))
 SECRET_KEY = os.environ.get("PRODE_SECRET_KEY", "dev-change-me")
 APP_NAME = "La Fija Mundialera"
 RATE_LIMITS: dict[str, list[float]] = {}
+APP_TIMEZONE = timezone(timedelta(hours=-3), "ART")
+MATCH_PENDING_AFTER = timedelta(hours=2)
 DEFAULT_LEGAL_TEXT = """Este prode es privado y se organiza entre conocidos. La participación implica jugar de buena fe, respetar a los demás participantes y mantener un espíritu competitivo sano.
 
 La administración puede moderar el chat, aplicar advertencias, timeouts, suspensiones o expulsiones por mala conducta dentro de la app, en el chat o fuera del sistema si afecta al grupo.
@@ -60,6 +64,9 @@ STAGES = [
     ("sf", "Semis", 7, 0),
     ("final", "Final", 8, 0),
 ]
+STAGE_ORDER = {key: order for key, _label, order, _bonus in STAGES}
+KNOCKOUT_STAGE_KEYS = {key for key, _label, order, _bonus in STAGES if order >= 4}
+SIDE_CHOICES = {"home", "away"}
 
 SETTINGS_DEFAULTS = {
     "entry_price": "10000",
@@ -74,9 +81,127 @@ SETTINGS_DEFAULTS = {
     "promiedos_games_url_template": "https://api.promiedos.com.ar/league/games/fjda/5930_25_1_{round}",
     "promiedos_group_rounds": "1,2,3",
     "promiedos_x_ver": "1.11.7.5",
+    "auto_results_enabled": "1",
+    "auto_results_stage_keys": "fecha_1,fecha_2,fecha_3,r32,r16,qf,sf,final",
+    "auto_results_sources": "espn,promiedos,worldcup26,upbound",
+    "auto_results_interval_seconds": "30",
+    "auto_results_start_before_minutes": "0",
+    "auto_results_stop_after_minutes": "170",
+    "auto_results_halftime_minutes": "45",
+    "auto_results_halftime_retry_minutes": "20",
+    "auto_results_fulltime_minutes": "90",
+    "auto_results_fulltime_retry_minutes": "45",
+    "auto_results_catchup_hours": "72",
+    "auto_results_apply_provisional": "1",
+    "auto_results_last_run_at": "",
+    "auto_results_last_summary": "Todavia no corrio.",
+    "auto_fixture_sync_enabled": "1",
+    "auto_fixture_sync_interval_minutes": "30",
+    "auto_fixture_sync_last_run_at": "",
+    "auto_fixture_sync_last_summary": "Todavia no corrio.",
+    "espn_scoreboard_url": "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard",
+    "worldcup26_api_url": "https://worldcup26.ir/get/games",
+    "upbound_worldcup_url": "https://raw.githubusercontent.com/upbound-web/worldcup-live.json/master/2026/worldcup.json",
     "chat_visible_after_id": "0",
     "legal_text": DEFAULT_LEGAL_TEXT,
     "legal_updated_at": "2026-05-10T00:00:00+00:00",
+}
+
+AUTO_RESULT_STAGE_LIMIT = {key for key, _label, _order, _bonus in STAGES}
+AUTO_RESULT_SOURCES = {"promiedos", "espn", "worldcup26", "upbound"}
+AUTO_RESULTS_WORKER_STARTED = False
+AUTO_RESULTS_WORKER_LOCK = threading.Lock()
+SCHEMA_READY_PATHS: set[Path] = set()
+SCHEMA_READY_LOCK = threading.Lock()
+
+AUTO_TEAM_ALIASES = {
+    "argentina": "argentina",
+    "alemania": "germany",
+    "algeria": "algeria",
+    "arabia saudita": "saudi arabia",
+    "argelia": "algeria",
+    "australia": "australia",
+    "austria": "austria",
+    "belgica": "belgium",
+    "belgium": "belgium",
+    "bosnia and herzegovina": "bosnia herzegovina",
+    "bosnia herzegovina": "bosnia herzegovina",
+    "brasil": "brazil",
+    "brazil": "brazil",
+    "cabo verde": "cape verde",
+    "canada": "canada",
+    "cape verde": "cape verde",
+    "chile": "chile",
+    "colombia": "colombia",
+    "corea del sur": "south korea",
+    "costa de marfil": "ivory coast",
+    "cote d ivoire": "ivory coast",
+    "south korea": "south korea",
+    "costa rica": "costa rica",
+    "croacia": "croatia",
+    "croatia": "croatia",
+    "curacao": "curacao",
+    "curazao": "curacao",
+    "czech republic": "czech republic",
+    "czechia": "czech republic",
+    "democratic republic of congo": "dr congo",
+    "dr congo": "dr congo",
+    "ecuador": "ecuador",
+    "egipto": "egypt",
+    "egypt": "egypt",
+    "escocia": "scotland",
+    "espana": "spain",
+    "spain": "spain",
+    "estados unidos": "united states",
+    "usa": "united states",
+    "united states": "united states",
+    "francia": "france",
+    "france": "france",
+    "germany": "germany",
+    "ghana": "ghana",
+    "haiti": "haiti",
+    "inglaterra": "england",
+    "england": "england",
+    "irak": "iraq",
+    "iran": "iran",
+    "iraq": "iraq",
+    "italia": "italy",
+    "italy": "italy",
+    "japon": "japan",
+    "japan": "japan",
+    "jordania": "jordan",
+    "jordan": "jordan",
+    "ivory coast": "ivory coast",
+    "marruecos": "morocco",
+    "morocco": "morocco",
+    "mexico": "mexico",
+    "netherlands": "netherlands",
+    "nueva zelanda": "new zealand",
+    "new zealand": "new zealand",
+    "noruega": "norway",
+    "norway": "norway",
+    "paises bajos": "netherlands",
+    "panama": "panama",
+    "paraguay": "paraguay",
+    "portugal": "portugal",
+    "qatar": "qatar",
+    "rd congo": "dr congo",
+    "republica checa": "czech republic",
+    "saudi arabia": "saudi arabia",
+    "scotland": "scotland",
+    "senegal": "senegal",
+    "sudafrica": "south africa",
+    "south africa": "south africa",
+    "suecia": "sweden",
+    "sweden": "sweden",
+    "suiza": "switzerland",
+    "switzerland": "switzerland",
+    "tunez": "tunisia",
+    "tunisia": "tunisia",
+    "turkey": "turkey",
+    "turquia": "turkey",
+    "uruguay": "uruguay",
+    "uzbekistan": "uzbekistan",
 }
 
 PUBLIC_USER_ENDPOINTS = {
@@ -93,8 +218,10 @@ PAGE_LABELS = {
     "dashboard": "Jugar",
     "fixture": "Fixture",
     "standings": "Tablas",
+    "history": "Historico",
     "chat": "Chat",
     "admin": "Admin",
+    "admin_ranking_image": "Imagen ranking",
     "legal_info": "Informacion",
     "change_password": "Clave",
 }
@@ -284,11 +411,69 @@ TEAM_COUNTRY_CODES = {
     "uzbekistan": "UZ",
 }
 
+TEAM_DISPLAY_NAMES = {
+    "alemania": "Alemania",
+    "arabia saudita": "Arabia Saudita",
+    "argentina": "Argentina",
+    "argelia": "Argelia",
+    "australia": "Australia",
+    "austria": "Austria",
+    "belgica": "Bélgica",
+    "bosnia herzegovina": "Bosnia Herzegovina",
+    "brasil": "Brasil",
+    "cabo verde": "Cabo Verde",
+    "canada": "Canadá",
+    "chile": "Chile",
+    "colombia": "Colombia",
+    "corea del sur": "Corea del Sur",
+    "costa de marfil": "Costa de Marfil",
+    "costa rica": "Costa Rica",
+    "croacia": "Croacia",
+    "curazao": "Curazao",
+    "ecuador": "Ecuador",
+    "egipto": "Egipto",
+    "escocia": "Escocia",
+    "espana": "España",
+    "estados unidos": "Estados Unidos",
+    "francia": "Francia",
+    "ghana": "Ghana",
+    "haiti": "Haití",
+    "inglaterra": "Inglaterra",
+    "irak": "Irak",
+    "iran": "Irán",
+    "italia": "Italia",
+    "japon": "Japón",
+    "jordania": "Jordania",
+    "marruecos": "Marruecos",
+    "mexico": "México",
+    "noruega": "Noruega",
+    "nueva zelanda": "Nueva Zelanda",
+    "panama": "Panamá",
+    "paises bajos": "Países Bajos",
+    "paraguay": "Paraguay",
+    "portugal": "Portugal",
+    "qatar": "Qatar",
+    "rd congo": "RD Congo",
+    "republica checa": "República Checa",
+    "senegal": "Senegal",
+    "sudafrica": "Sudáfrica",
+    "suecia": "Suecia",
+    "suiza": "Suiza",
+    "tunez": "Túnez",
+    "turquia": "Turquía",
+    "uruguay": "Uruguay",
+    "uzbekistan": "Uzbekistán",
+}
+
+BRACKET_TEAM_OPTIONS = sorted({team for _stage, _starts_at, home, away in BRACKET_PLACEHOLDER_GAMES for team in (home, away)})
+
 
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config.update(
         SECRET_KEY=SECRET_KEY,
+        PERMANENT_SESSION_LIFETIME=timedelta(days=60),
+        SESSION_REFRESH_EACH_REQUEST=True,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         SESSION_COOKIE_SECURE=os.environ.get("PRODE_COOKIE_SECURE", "0") == "1",
@@ -298,13 +483,14 @@ def create_app() -> Flask:
     def load_user() -> None:
         session.setdefault("csrf_token", secrets.token_urlsafe(32))
         g.db = get_db()
-        ensure_runtime_schema(g.db)
+        ensure_runtime_schema_once(g.db)
         g.database_path = current_database_path()
         g.database_name = current_database_name()
         g.is_primary_database = is_primary_database()
         g.user = None
         user_id = session.get("user_id")
         if user_id:
+            session.permanent = True
             g.user = query_one("select * from users where id = ?", (user_id,))
         if g.user and request.endpoint not in PUBLIC_USER_ENDPOINTS:
             if g.user["force_password_change"]:
@@ -318,9 +504,13 @@ def create_app() -> Flask:
             return
         token = request.form.get("csrf_token") or request.headers.get("X-CSRFToken")
         if not token or not secrets.compare_digest(token, session.get("csrf_token", "")):
+            session["csrf_token"] = secrets.token_urlsafe(32)
+            if request.endpoint == "login":
+                return
             if wants_json():
                 return jsonify({"ok": False, "message": "Sesion vencida. Actualiza la pagina e intenta de nuevo."}), 400
-            abort(400)
+            flash("Sesion vencida. Volve a intentar desde la pantalla actualizada.", "error")
+            return redirect(url_for("index"))
 
     @app.teardown_appcontext
     def close_db(_error: Exception | None) -> None:
@@ -333,6 +523,8 @@ def create_app() -> Flask:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
         response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        if request.endpoint != "static":
+            response.headers["Cache-Control"] = "no-store, max-age=0"
         return response
 
     @app.template_filter("money")
@@ -378,6 +570,12 @@ def create_app() -> Flask:
             g.db.commit()
             flash("Tu cuenta esta suspendida para participar.", "error")
             return redirect(url_for("index"))
+        database_name = current_database_name()
+        session.clear()
+        session.permanent = True
+        session["csrf_token"] = secrets.token_urlsafe(32)
+        if database_name:
+            session["database_name"] = database_name
         session["user_id"] = user["id"]
         log_event("login", "Ingreso correcto", user["id"])
         g.db.commit()
@@ -447,7 +645,9 @@ def create_app() -> Flask:
     @login_required
     def dashboard():
         stages = get_stages()
-        active_stage = next((stage for stage in stages if not stage["is_locked"]), stages[0])
+        active_stage_index = next((index for index, stage in enumerate(stages) if not stage["is_locked"]), 0)
+        active_stage = stages[active_stage_index]
+        playing_stage = stages[active_stage_index - 1] if active_stage_index > 0 else active_stage
         games = query_all(
             "select * from games where stage_key = ? order by starts_at, id",
             (active_stage["stage_key"],),
@@ -464,7 +664,8 @@ def create_app() -> Flask:
             predictions=predictions,
             settings=get_settings(),
             leaderboard=leaderboard(),
-            active_stage_board=leaderboard(active_stage["stage_key"]),
+            playing_stage=playing_stage,
+            playing_stage_board=leaderboard(playing_stage["stage_key"]),
             prediction_progress=prediction_progress(g.user["id"]),
             stage_winners=stage_winners(),
             prize_rows=prize_rows(),
@@ -474,7 +675,6 @@ def create_app() -> Flask:
     @login_required
     def fixture():
         stages = get_stages()
-        first_open_stage_key = next((stage["stage_key"] for stage in stages if not stage["is_locked"]), stages[0]["stage_key"])
         games_by_stage = {
             stage["stage_key"]: query_all(
                 "select * from games where stage_key = ? order by starts_at, id",
@@ -482,6 +682,40 @@ def create_app() -> Flask:
             )
             for stage in stages
         }
+        first_open_index = next((index for index, stage in enumerate(stages) if not stage["is_locked"]), None)
+        first_open_stage_key = None
+        current_playing_stage_key = None
+        if first_open_index is None:
+            for stage in reversed(stages):
+                if not stage_locked_and_played(stage, games_by_stage[stage["stage_key"]]):
+                    current_playing_stage_key = stage["stage_key"]
+                    break
+        else:
+            first_open_stage_key = stages[first_open_index]["stage_key"]
+            if first_open_index > 0:
+                previous_stage = stages[first_open_index - 1]
+                if not stage_locked_and_played(previous_stage, games_by_stage[previous_stage["stage_key"]]):
+                    current_playing_stage_key = previous_stage["stage_key"]
+        default_fixture_stage_key = current_playing_stage_key or first_open_stage_key
+        locked_played_stage_keys = {
+            stage["stage_key"]
+            for stage in stages
+            if stage_locked_and_played(stage, games_by_stage[stage["stage_key"]])
+        }
+        if default_fixture_stage_key in locked_played_stage_keys:
+            default_fixture_stage_key = first_open_stage_key if first_open_stage_key not in locked_played_stage_keys else None
+        fixture_states = {}
+        fixture_state_summaries = {}
+        now = datetime.now(APP_TIMEZONE)
+        for stage in stages:
+            stage_key = stage["stage_key"]
+            stage_states, stage_summary = fixture_game_states(
+                games_by_stage[stage_key],
+                now,
+                mark_next=stage_key == current_playing_stage_key,
+            )
+            fixture_states[stage_key] = stage_states
+            fixture_state_summaries[stage_key] = stage_summary
         predictions = {
             row["game_id"]: row
             for row in query_all("select * from predictions where user_id = ?", (g.user["id"],))
@@ -491,6 +725,11 @@ def create_app() -> Flask:
             stages=stages,
             games_by_stage=games_by_stage,
             first_open_stage_key=first_open_stage_key,
+            current_playing_stage_key=current_playing_stage_key,
+            default_fixture_stage_key=default_fixture_stage_key,
+            locked_played_stage_keys=locked_played_stage_keys,
+            fixture_states=fixture_states,
+            fixture_state_summaries=fixture_state_summaries,
             predictions=predictions,
         )
 
@@ -505,7 +744,8 @@ def create_app() -> Flask:
             away_goals = int(request.form.get("away_goals", ""))
         except ValueError:
             return prediction_error("Los goles tienen que ser numeros.")
-        error = save_prediction(game, home_goals, away_goals)
+        penalty_winner = clean_side_choice(request.form.get("penalty_winner"))
+        error = save_prediction(game, home_goals, away_goals, penalty_winner)
         if error:
             return prediction_error(error)
         g.db.commit()
@@ -515,7 +755,7 @@ def create_app() -> Flask:
                     "ok": True,
                     "message": "Prediccion guardada.",
                     "game_id": game_id,
-                    "label": prediction_text(game, home_goals, away_goals),
+                    "label": prediction_text(game, home_goals, away_goals, penalty_winner),
                 }
             )
         flash("Prediccion guardada.", "ok")
@@ -533,6 +773,7 @@ def create_app() -> Flask:
                 game_id = int(raw_game_id)
                 home_goals = int(request.form.get(f"home_goals_{game_id}", ""))
                 away_goals = int(request.form.get(f"away_goals_{game_id}", ""))
+                penalty_winner = clean_side_choice(request.form.get(f"penalty_winner_{game_id}"))
             except ValueError:
                 errors.append("Hay goles con formato invalido.")
                 continue
@@ -540,12 +781,12 @@ def create_app() -> Flask:
             if not game:
                 errors.append(f"Partido {game_id} no existe.")
                 continue
-            error = save_prediction(game, home_goals, away_goals)
+            error = save_prediction(game, home_goals, away_goals, penalty_winner)
             if error:
                 errors.append(error)
                 continue
             saved += 1
-            saved_predictions[game_id] = prediction_text(game, home_goals, away_goals)
+            saved_predictions[game_id] = prediction_text(game, home_goals, away_goals, penalty_winner)
         if saved:
             g.db.commit()
         message = f"{saved} predicciones guardadas." if saved != 1 else "1 prediccion guardada."
@@ -566,6 +807,18 @@ def create_app() -> Flask:
             stage_winners=stage_winners(),
             prize_rows=prize_rows(),
             settings=get_settings(),
+        )
+
+    @app.route("/historico")
+    @login_required
+    def history():
+        history_data = historical_progress()
+        return render_template(
+            "history.html",
+            history_groups=history_data["groups"],
+            history_chart=history_data["chart"],
+            history_stage_chart=history_data["stage_chart"],
+            latest_history_event=history_data["latest_event"],
         )
 
     @app.route("/chat")
@@ -716,12 +969,29 @@ def create_app() -> Flask:
     @app.route("/admin")
     @admin_required
     def admin():
+        stages = get_stages()
+        users = query_all("select * from users order by is_admin desc, username")
+        user_prediction_audit = admin_prediction_audit(users, stages)
+        prediction_audit_summary = next(
+            iter(user_prediction_audit.values()),
+            {"total": 0, "tournament_total": 0, "future_total": 0},
+        )
+        current_stage_key = current_results_stage_key(stages)
+        selected_stage_key = request.args.get("results_stage") or current_stage_key
+        valid_stage_keys = {stage["stage_key"] for stage in stages}
+        if selected_stage_key != "all" and selected_stage_key not in valid_stage_keys:
+            selected_stage_key = current_stage_key
+        result_games = query_all("select * from games order by starts_at, id")
         return render_template(
             "admin.html",
-            users=query_all("select * from users order by is_admin desc, username"),
+            users=users,
+            user_prediction_audit=user_prediction_audit,
+            prediction_audit_summary=prediction_audit_summary,
             audit_groups=audit_groups(),
-            stages=get_stages(),
-            games=query_all("select * from games order by starts_at, id"),
+            stages=stages,
+            games=result_games,
+            selected_results_stage_key=selected_stage_key,
+            current_results_stage_key=current_stage_key,
             settings=get_settings(),
             can_debug=can_debug(),
             databases=available_databases(),
@@ -735,6 +1005,16 @@ def create_app() -> Flask:
                 order by sanctions.id desc limit 30
                 """
             ),
+        )
+
+    @app.route("/admin/ranking-image")
+    @admin_required
+    def admin_ranking_image():
+        now = datetime.now(APP_TIMEZONE)
+        return render_template(
+            "admin_ranking_image.html",
+            ranking_payload=ranking_image_payload(),
+            default_title=f"La Fija Mundialera - Tablas y premios ({now.strftime('%d/%m/%y')})",
         )
 
     @app.route("/admin/backup/json", methods=["POST"])
@@ -951,21 +1231,58 @@ def create_app() -> Flask:
     @app.route("/admin/games/<int:game_id>", methods=["POST"])
     @admin_required
     def admin_update_game(game_id: int):
+        game = query_one("select * from games where id = ?", (game_id,))
+        if not game:
+            abort(404)
+        starts_at = request.form.get("starts_at", game["starts_at"]).strip()
+        home_team = request.form.get("home_team", game["home_team"]).strip()
+        away_team = request.form.get("away_team", game["away_team"]).strip()
+        if not starts_at or not home_team or not away_team:
+            flash("Completá horario, local y visitante para guardar el partido.", "error")
+            return redirect(admin_results_url())
+        fixture_changed = starts_at != game["starts_at"] or home_team != game["home_team"] or away_team != game["away_team"]
+        fixture_manual = 1 if fixture_changed or request.form.get("fixture_manual") == "1" else 0
         home_score = blank_to_none(request.form.get("home_score"))
         away_score = blank_to_none(request.form.get("away_score"))
-        result = request.form.get("result") or None
-        if result not in {None, "home", "draw", "away"}:
-            abort(400)
-        if result is None and home_score is not None and away_score is not None:
-            result = result_from_score(home_score, away_score)
+        penalty_winner = clean_side_choice(request.form.get("result_penalty_winner"))
+        if needs_penalty_winner(game["stage_key"], home_score, away_score) and not penalty_winner:
+            flash("Elegi quien clasifica por penales para guardar ese empate.", "error")
+            return redirect(admin_results_url())
+        stored_penalty_winner = penalty_winner_for_result(game["stage_key"], home_score, away_score, penalty_winner)
+        result = result_from_score_and_penalties(game["stage_key"], home_score, away_score, stored_penalty_winner)
+        result_status = "manual" if result is not None else "pending"
         g.db.execute(
-            "update games set home_score = ?, away_score = ?, result = ? where id = ?",
-            (home_score, away_score, result, game_id),
+            """
+            update games
+            set starts_at = ?, home_team = ?, away_team = ?,
+                home_score = ?, away_score = ?, result = ?, result_penalty_winner = ?, result_status = ?,
+                fixture_manual = ?
+            where id = ?
+            """,
+            (starts_at, home_team, away_team, home_score, away_score, result, stored_penalty_winner, result_status, fixture_manual, game_id),
         )
-        log_event("admin_result_update", f"Partido {game_id}: {home_score}-{away_score} ({result or 'sin resultado'})")
+        penalty_label = home_team if stored_penalty_winner == "home" else away_team if stored_penalty_winner == "away" else ""
+        detail = f"{penalty_label} por penales" if stored_penalty_winner else (result or "sin resultado")
+        fixture_detail = f"; fixture manual: {home_team} vs {away_team} {starts_at}" if fixture_changed else ""
+        log_event("admin_result_update", f"Partido {game_id}: {home_score}-{away_score} ({detail}){fixture_detail}")
         g.db.commit()
         flash("Resultado guardado.", "ok")
-        return redirect(url_for("admin"))
+        return redirect(admin_results_url())
+
+    @app.route("/admin/games/<int:game_id>/clear-result", methods=["POST"])
+    @admin_required
+    def admin_clear_game_result(game_id: int):
+        game = query_one("select * from games where id = ?", (game_id,))
+        if not game:
+            abort(404)
+        g.db.execute(
+            "update games set home_score = null, away_score = null, result = null, result_penalty_winner = null, result_status = 'pending' where id = ?",
+            (game_id,),
+        )
+        log_event("admin_result_clear", f"Partido {game_id}: {game['home_team']} vs {game['away_team']} quedo sin resultado")
+        g.db.commit()
+        flash("Resultado borrado.", "ok")
+        return redirect(admin_results_url())
 
     @app.route("/admin/games", methods=["POST"])
     @admin_required
@@ -996,7 +1313,8 @@ def create_app() -> Flask:
                 continue
             if key not in request.form:
                 continue
-            value = request.form.get(key, SETTINGS_DEFAULTS[key]).strip()
+            values = request.form.getlist(key)
+            value = (values[-1] if values else SETTINGS_DEFAULTS[key]).strip()
             g.db.execute(
                 "insert into settings (key, value) values (?, ?) on conflict(key) do update set value = excluded.value",
                 (key, value),
@@ -1037,6 +1355,17 @@ def create_app() -> Flask:
             f"Promiedos sincronizado: {stats['created']} nuevos, {stats['updated']} actualizados, {stats['skipped']} omitidos.",
             "ok",
         )
+        return redirect(url_for("admin"))
+
+    @app.route("/admin/auto-results/run-once", methods=["POST"])
+    @admin_required
+    def admin_auto_results_run_once():
+        try:
+            stats = sync_auto_results_once(manual=True)
+        except Exception as exc:
+            flash(f"No se pudo ejecutar auto resultados: {exc}", "error")
+            return redirect(url_for("admin"))
+        flash(auto_results_flash_message(stats), "ok" if not stats["errors"] else "error")
         return redirect(url_for("admin"))
 
     @app.route("/admin/chat/<int:message_id>/delete", methods=["POST"])
@@ -1125,26 +1454,60 @@ def create_app() -> Flask:
             "prediction_status": prediction_status,
             "prediction_status_label": prediction_status_label,
             "game_result": game_result,
+            "game_is_final": game_is_final,
+            "game_is_live": game_is_live,
+            "game_penalty_winner": game_penalty_winner,
+            "game_went_to_penalties": game_went_to_penalties,
+            "result_detail_label": result_detail_label,
+            "game_status_label": game_status_label,
+            "is_knockout_stage": is_knockout_stage,
+            "needs_penalty_winner": needs_penalty_winner,
             "team_label": team_label,
             "team_flag": team_flag,
+            "team_select_options": team_select_options,
+            "team_select_values": team_select_values,
+            "bracket_team_options": bracket_team_options,
             "rank_badge": rank_badge,
             "asset_version": asset_version,
             "app_name": APP_NAME,
             "current_page_label": current_page_label,
             "accepted_current_terms": accepted_current_terms,
             "format_datetime": format_datetime,
+            "format_game_datetime": format_game_datetime,
             "csrf_token": lambda: session.get("csrf_token", ""),
         }
 
+    start_auto_results_worker(app)
     return app
 
 
 def get_db() -> sqlite3.Connection:
     if "db" not in g:
         current_database_path().parent.mkdir(parents=True, exist_ok=True)
-        g.db = sqlite3.connect(current_database_path())
+        g.db = sqlite3.connect(current_database_path(), timeout=15)
         g.db.row_factory = sqlite3.Row
+        g.db.execute("pragma busy_timeout = 15000")
+        g.db.execute("pragma journal_mode = wal")
+        g.db.execute("pragma synchronous = normal")
     return g.db
+
+
+def ensure_runtime_schema_once(db: sqlite3.Connection) -> None:
+    path = current_database_path().resolve()
+    if path in SCHEMA_READY_PATHS:
+        return
+    with SCHEMA_READY_LOCK:
+        if path in SCHEMA_READY_PATHS:
+            return
+        ensure_runtime_schema(db)
+        db.commit()
+        SCHEMA_READY_PATHS.add(path)
+
+
+def forget_runtime_schema(path: Path | None = None) -> None:
+    target = (path or current_database_path()).resolve()
+    with SCHEMA_READY_LOCK:
+        SCHEMA_READY_PATHS.discard(target)
 
 
 def ensure_runtime_schema(db: sqlite3.Connection) -> None:
@@ -1159,10 +1522,16 @@ def ensure_runtime_schema(db: sqlite3.Connection) -> None:
     ensure_column(db, "users", "chat_seen_at", "text")
     if table_exists(db, "games"):
         ensure_column(db, "games", "external_id", "text")
-        db.execute("create unique index if not exists idx_games_external_id on games(external_id) where external_id is not null")
+        ensure_column(db, "games", "result_status", "text not null default 'pending'")
+        ensure_column(db, "games", "result_penalty_winner", "text")
+        ensure_column(db, "games", "fixture_manual", "integer not null default 0")
+        mark_existing_results_final(db)
     if table_exists(db, "predictions"):
         ensure_column(db, "predictions", "home_goals", "integer")
         ensure_column(db, "predictions", "away_goals", "integer")
+        ensure_column(db, "predictions", "penalty_winner", "text")
+    if table_exists(db, "settings"):
+        ensure_settings_defaults(db)
     db.execute(
         """
         create table if not exists audit_logs (
@@ -1177,6 +1546,7 @@ def ensure_runtime_schema(db: sqlite3.Connection) -> None:
         )
         """
     )
+    ensure_indexes(db)
 
 
 def bootstrap_database(db: sqlite3.Connection) -> None:
@@ -1212,7 +1582,10 @@ def bootstrap_database(db: sqlite3.Connection) -> None:
             away_team text not null,
             home_score integer,
             away_score integer,
-            result text
+            result text,
+            result_penalty_winner text,
+            result_status text not null default 'pending',
+            fixture_manual integer not null default 0
         );
         create table if not exists predictions (
             id integer primary key autoincrement,
@@ -1221,6 +1594,7 @@ def bootstrap_database(db: sqlite3.Connection) -> None:
             choice text not null,
             home_goals integer,
             away_goals integer,
+            penalty_winner text,
             updated_at text not null,
             unique(user_id, game_id)
         );
@@ -1256,7 +1630,7 @@ def bootstrap_database(db: sqlite3.Connection) -> None:
         );
         """
     )
-    db.execute("create unique index if not exists idx_games_external_id on games(external_id) where external_id is not null")
+    ensure_indexes(db)
     for key, label, order, is_bonus in STAGES:
         db.execute(
             """
@@ -1268,6 +1642,7 @@ def bootstrap_database(db: sqlite3.Connection) -> None:
         )
     for key, value in SETTINGS_DEFAULTS.items():
         db.execute("insert or ignore into settings (key, value) values (?, ?)", (key, value))
+    ensure_settings_defaults(db)
     seed_bracket_placeholders(db)
     if not db.execute("select 1 from users where username = 'admin'").fetchone():
         db.execute(
@@ -1287,6 +1662,78 @@ def bootstrap_database(db: sqlite3.Connection) -> None:
 
 def table_exists(db: sqlite3.Connection, table: str) -> bool:
     return db.execute("select 1 from sqlite_master where type = 'table' and name = ?", (table,)).fetchone() is not None
+
+
+def ensure_settings_defaults(db: sqlite3.Connection) -> None:
+    for key, value in SETTINGS_DEFAULTS.items():
+        db.execute("insert or ignore into settings (key, value) values (?, ?)", (key, value))
+    db.execute(
+        """
+        update settings
+        set value = '30'
+        where key = 'auto_results_interval_seconds' and value = '120'
+        """
+    )
+    db.execute(
+        """
+        update settings
+        set value = '0'
+        where key = 'auto_results_start_before_minutes' and value = '5'
+        """
+    )
+    db.execute(
+        """
+        update settings
+        set value = 'espn,promiedos,worldcup26,upbound'
+        where key = 'auto_results_sources' and value = 'promiedos,espn,worldcup26,upbound'
+        """
+    )
+    db.execute(
+        """
+        update settings
+        set value = 'fecha_1,fecha_2,fecha_3,r32,r16,qf,sf,final'
+        where key = 'auto_results_stage_keys' and value = 'fecha_1,fecha_2,fecha_3'
+        """
+    )
+
+
+def ensure_indexes(db: sqlite3.Connection) -> None:
+    if table_exists(db, "games"):
+        db.execute("create unique index if not exists idx_games_external_id on games(external_id) where external_id is not null")
+        db.execute("create index if not exists idx_games_stage_start on games(stage_key, starts_at, id)")
+        db.execute(
+            """
+            create index if not exists idx_games_completed_order
+            on games(starts_at, id)
+            where home_score is not null and away_score is not null
+            """
+        )
+    if table_exists(db, "predictions"):
+        db.execute("create index if not exists idx_predictions_game_user on predictions(game_id, user_id)")
+        db.execute("create index if not exists idx_predictions_user_game on predictions(user_id, game_id)")
+    if table_exists(db, "chat_messages"):
+        db.execute("create index if not exists idx_chat_messages_created on chat_messages(created_at, id)")
+        db.execute("create index if not exists idx_chat_messages_user_created on chat_messages(user_id, created_at)")
+    if table_exists(db, "audit_logs"):
+        db.execute("create index if not exists idx_audit_logs_created on audit_logs(created_at)")
+        db.execute("create index if not exists idx_audit_logs_user_created on audit_logs(user_id, created_at)")
+    if table_exists(db, "sanctions"):
+        db.execute("create index if not exists idx_sanctions_user_type_expires on sanctions(user_id, type, expires_at)")
+
+
+def mark_existing_results_final(db: sqlite3.Connection) -> None:
+    final_cutoff = (datetime.now(APP_TIMEZONE) - timedelta(minutes=140)).strftime("%Y-%m-%d %H:%M")
+    db.execute(
+        """
+        update games
+        set result_status = 'final'
+        where result_status = 'pending'
+          and home_score is not null
+          and away_score is not null
+          and starts_at <= ?
+        """,
+        (final_cutoff,),
+    )
 
 
 def current_database_name() -> str:
@@ -1437,12 +1884,14 @@ def log_event(action: str, detail: str = "", user_id: int | None = None) -> None
     actor_id = g.user["id"] if getattr(g, "user", None) else None
     if user_id is None:
         user_id = actor_id
+    ip_address = client_ip() if has_request_context() else "auto"
+    user_agent = client_agent() if has_request_context() else "auto-results-worker"
     g.db.execute(
         """
         insert into audit_logs (user_id, actor_id, action, detail, ip_address, user_agent, created_at)
         values (?, ?, ?, ?, ?, ?, ?)
         """,
-        (user_id, actor_id, action, detail[:800], client_ip(), client_agent(), utc_now()),
+        (user_id, actor_id, action, detail[:800], ip_address, user_agent, utc_now()),
     )
 
 
@@ -1484,27 +1933,31 @@ def prediction_error(message: str):
     return redirect(url_for("dashboard"))
 
 
-def save_prediction(game: sqlite3.Row, home_goals: int, away_goals: int) -> str | None:
+def save_prediction(game: sqlite3.Row, home_goals: int, away_goals: int, penalty_winner: str | None = None) -> str | None:
     stage = query_one("select * from stages where stage_key = ?", (game["stage_key"],))
     if stage["is_locked"]:
         return "Esta etapa ya esta bloqueada."
     if not (0 <= home_goals <= 30 and 0 <= away_goals <= 30):
         return "Los goles tienen que estar entre 0 y 30."
-    choice = result_from_score(home_goals, away_goals)
+    choice, stored_penalty_winner, error = prediction_choice_for_score(game, home_goals, away_goals, penalty_winner)
+    if error:
+        return error
     now = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     g.db.execute(
         """
-        insert into predictions (user_id, game_id, choice, home_goals, away_goals, updated_at)
-        values (?, ?, ?, ?, ?, ?)
+        insert into predictions (user_id, game_id, choice, home_goals, away_goals, penalty_winner, updated_at)
+        values (?, ?, ?, ?, ?, ?, ?)
         on conflict(user_id, game_id) do update set
             choice = excluded.choice,
             home_goals = excluded.home_goals,
             away_goals = excluded.away_goals,
+            penalty_winner = excluded.penalty_winner,
             updated_at = excluded.updated_at
         """,
-        (g.user["id"], game["id"], choice, home_goals, away_goals, now),
+        (g.user["id"], game["id"], choice, home_goals, away_goals, stored_penalty_winner, now),
     )
-    log_event("prediction_save", f"{game['home_team']} vs {game['away_team']}: {home_goals}-{away_goals}")
+    penalty_detail = f"; {choice_label(game, stored_penalty_winner)} por penales" if stored_penalty_winner else ""
+    log_event("prediction_save", f"{game['home_team']} vs {game['away_team']}: {home_goals}-{away_goals}{penalty_detail}")
     return None
 
 
@@ -1523,6 +1976,25 @@ def get_settings() -> dict[str, str]:
 
 def get_stages() -> list[sqlite3.Row]:
     return query_all("select * from stages order by sort_order")
+
+
+def current_results_stage_key(stages: list[sqlite3.Row] | None = None) -> str:
+    stages = stages or get_stages()
+    if not stages:
+        return "fecha_1"
+    first_open_index = next((index for index, stage in enumerate(stages) if not stage["is_locked"]), None)
+    if first_open_index is None:
+        return stages[-1]["stage_key"]
+    if first_open_index > 0:
+        return stages[first_open_index - 1]["stage_key"]
+    return stages[first_open_index]["stage_key"]
+
+
+def admin_results_url() -> str:
+    results_stage = request.form.get("results_stage", "").strip()
+    if results_stage:
+        return url_for("admin", results_stage=results_stage)
+    return url_for("admin")
 
 
 def stage_label(stage_key: str) -> str:
@@ -1549,6 +2021,24 @@ def team_flag(name: str) -> Markup | str:
     return Markup(f'<img class="flag" src="{flag_url}" alt="{safe_name}">')
 
 
+def team_select_options() -> list[dict[str, str]]:
+    options = []
+    for key, country_code in TEAM_COUNTRY_CODES.items():
+        label = TEAM_DISPLAY_NAMES.get(key, key.title())
+        emoji = TEAM_FLAGS.get(key) or flag_emoji(country_code)
+        options.append({"value": label, "label": f"{emoji} {label}" if emoji else label, "key": normalize_team_name(label)})
+    unique = {option["key"]: option for option in options}
+    return sorted(unique.values(), key=lambda option: normalize_team_name(option["value"]))
+
+
+def team_select_values() -> list[str]:
+    return [option["value"] for option in team_select_options()]
+
+
+def bracket_team_options() -> list[str]:
+    return BRACKET_TEAM_OPTIONS
+
+
 def normalize_team_name(name: str) -> str:
     normalized = unicodedata.normalize("NFKD", (name or "").strip().lower())
     return "".join(char for char in normalized if not unicodedata.combining(char))
@@ -1571,6 +2061,33 @@ def choice_label(game: sqlite3.Row, choice: str | None) -> str:
     return "Sin elegir"
 
 
+def row_value(row: sqlite3.Row | dict, key: str, default=None):
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        return row[key] if key in row.keys() else default
+    except (KeyError, AttributeError):
+        return default
+
+
+def clean_side_choice(value: str | None) -> str | None:
+    value = (value or "").strip().lower()
+    return value if value in SIDE_CHOICES else None
+
+
+def is_knockout_stage(stage_key: str | None) -> bool:
+    return stage_key in KNOCKOUT_STAGE_KEYS
+
+
+def needs_penalty_winner(stage_key: str | None, home_goals: int | None, away_goals: int | None) -> bool:
+    return (
+        is_knockout_stage(stage_key)
+        and home_goals is not None
+        and away_goals is not None
+        and home_goals == away_goals
+    )
+
+
 def result_from_score(home_goals: int, away_goals: int) -> str:
     if home_goals > away_goals:
         return "home"
@@ -1579,12 +2096,179 @@ def result_from_score(home_goals: int, away_goals: int) -> str:
     return "draw"
 
 
-def game_result(game: sqlite3.Row) -> str | None:
-    if game["result"]:
-        return game["result"]
-    if game["home_score"] is None or game["away_score"] is None:
+def result_from_score_and_penalties(
+    stage_key: str | None,
+    home_goals: int | None,
+    away_goals: int | None,
+    penalty_winner: str | None = None,
+) -> str | None:
+    if home_goals is None or away_goals is None:
         return None
+    penalty_winner = clean_side_choice(penalty_winner)
+    if needs_penalty_winner(stage_key, home_goals, away_goals) and penalty_winner:
+        return penalty_winner
+    return result_from_score(home_goals, away_goals)
+
+
+def penalty_winner_for_result(
+    stage_key: str | None,
+    home_goals: int | None,
+    away_goals: int | None,
+    result: str | None,
+) -> str | None:
+    result = clean_side_choice(result)
+    if needs_penalty_winner(stage_key, home_goals, away_goals) and result:
+        return result
+    return None
+
+
+def prediction_choice_for_score(
+    game: sqlite3.Row,
+    home_goals: int,
+    away_goals: int,
+    penalty_winner: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    penalty_winner = clean_side_choice(penalty_winner)
+    if needs_penalty_winner(game["stage_key"], home_goals, away_goals):
+        if not penalty_winner:
+            return None, None, "Elegi quien pasa por penales."
+        return penalty_winner, penalty_winner, None
+    return result_from_score(home_goals, away_goals), None, None
+
+
+def game_result_status(game: sqlite3.Row) -> str:
+    if "result_status" not in game.keys():
+        return "pending"
+    return str(game["result_status"] or "pending").strip().lower()
+
+
+def game_has_score(game: sqlite3.Row) -> bool:
+    return game["home_score"] is not None and game["away_score"] is not None
+
+
+def game_is_final(game: sqlite3.Row) -> bool:
+    return game_has_score(game) and game_result_status(game) in {"final", "manual"}
+
+
+def game_is_live(game: sqlite3.Row) -> bool:
+    return game_has_score(game) and game_result_status(game) == "live"
+
+
+def game_status_label(game: sqlite3.Row) -> str:
+    if game_is_final(game):
+        return "Final"
+    if game_is_live(game):
+        return "Parcial"
+    return "Pendiente"
+
+
+def game_result(game: sqlite3.Row) -> str | None:
+    if not game_is_final(game):
+        return None
+    penalty_winner = clean_side_choice(row_value(game, "result_penalty_winner"))
+    if needs_penalty_winner(game["stage_key"], game["home_score"], game["away_score"]):
+        if penalty_winner:
+            return penalty_winner
+        result = clean_side_choice(game["result"])
+        return result
     return result_from_score(game["home_score"], game["away_score"])
+
+
+def game_penalty_winner(game: sqlite3.Row) -> str | None:
+    if not needs_penalty_winner(game["stage_key"], game["home_score"], game["away_score"]):
+        return None
+    explicit = clean_side_choice(row_value(game, "result_penalty_winner"))
+    if explicit:
+        return explicit
+    result = game_result(game)
+    return clean_side_choice(result)
+
+
+def game_went_to_penalties(game: sqlite3.Row) -> bool:
+    return game_penalty_winner(game) is not None
+
+
+def result_detail_label(game: sqlite3.Row) -> str:
+    result = game_result(game)
+    if result is None:
+        return "Sin resultado"
+    label = choice_label(game, result)
+    if game_went_to_penalties(game):
+        return f"{label} por penales"
+    return label
+
+
+def stage_locked_and_played(stage: sqlite3.Row, games: list[sqlite3.Row]) -> bool:
+    return bool(stage["is_locked"]) and bool(games) and all(game_result(game) for game in games)
+
+
+def parse_game_start(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        starts_at = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if starts_at.tzinfo is None:
+        starts_at = starts_at.replace(tzinfo=APP_TIMEZONE)
+    return starts_at.astimezone(APP_TIMEZONE)
+
+
+def format_game_datetime(value: str | None) -> str:
+    starts_at = parse_game_start(value)
+    if not starts_at:
+        return format_datetime(value)
+    return f"{starts_at.strftime('%d/%m %H:%M')} ARG"
+
+
+def fixture_game_states(
+    games: list[sqlite3.Row],
+    now: datetime,
+    mark_next: bool = False,
+) -> tuple[dict[int, dict[str, str]], dict[str, int]]:
+    pending_game_id = None
+    next_game_id = None
+    missing_games = []
+    if mark_next:
+        for game in games:
+            if game_is_final(game) or game_is_live(game):
+                continue
+            starts_at = parse_game_start(game["starts_at"])
+            missing_games.append((starts_at or datetime.max.replace(tzinfo=APP_TIMEZONE), game["id"]))
+        overdue_games = [
+            item
+            for item in missing_games
+            if item[0] != datetime.max.replace(tzinfo=APP_TIMEZONE) and now >= item[0] + MATCH_PENDING_AFTER
+        ]
+        if overdue_games:
+            pending_game_id = min(overdue_games, key=lambda item: item[0])[1]
+        next_candidates = [item for item in missing_games if item[1] != pending_game_id]
+        if next_candidates:
+            next_game_id = min(next_candidates, key=lambda item: item[0])[1]
+
+    labels = {
+        "final": "Final",
+        "live": "Parcial",
+        "pending": "Pendiente",
+        "next": "Proximo",
+        "upcoming": "Por disputar",
+    }
+    states: dict[int, dict[str, str]] = {}
+    summary = {key: 0 for key in labels}
+    for game in games:
+        if game_is_final(game):
+            key = "final"
+        elif game_is_live(game):
+            key = "live"
+        elif pending_game_id == game["id"]:
+            key = "pending"
+        elif next_game_id == game["id"]:
+            key = "next"
+        else:
+            key = "upcoming"
+        summary[key] += 1
+        states[game["id"]] = {"key": key, "label": labels[key]}
+    return states, summary
 
 
 def prediction_label(game: sqlite3.Row, prediction: sqlite3.Row | None) -> str:
@@ -1593,11 +2277,16 @@ def prediction_label(game: sqlite3.Row, prediction: sqlite3.Row | None) -> str:
     score = ""
     if prediction["home_goals"] is not None and prediction["away_goals"] is not None:
         score = f" {prediction['home_goals']}-{prediction['away_goals']}"
-    return f"{choice_label(game, prediction['choice'])}{score}"
+    suffix = " por penales" if row_value(prediction, "penalty_winner") else ""
+    return f"{choice_label(game, prediction['choice'])}{suffix}{score}"
 
 
-def prediction_text(game: sqlite3.Row, home_goals: int, away_goals: int) -> str:
-    return f"{choice_label(game, result_from_score(home_goals, away_goals))} {home_goals}-{away_goals}"
+def prediction_text(game: sqlite3.Row, home_goals: int, away_goals: int, penalty_winner: str | None = None) -> str:
+    choice, stored_penalty_winner, _error = prediction_choice_for_score(game, home_goals, away_goals, penalty_winner)
+    if choice is None:
+        return f"Empate {home_goals}-{away_goals}"
+    suffix = " por penales" if stored_penalty_winner else ""
+    return f"{choice_label(game, choice)}{suffix} {home_goals}-{away_goals}"
 
 
 def prediction_status(game: sqlite3.Row, prediction: sqlite3.Row | None) -> str:
@@ -1628,8 +2317,10 @@ def prediction_points(prediction: sqlite3.Row, game: sqlite3.Row) -> int:
     result = game_result(game)
     if result is None:
         return 0
+    result_hit = prediction["choice"] == result
     if (
-        prediction["home_goals"] is not None
+        result_hit
+        and prediction["home_goals"] is not None
         and prediction["away_goals"] is not None
         and game["home_score"] is not None
         and game["away_score"] is not None
@@ -1637,7 +2328,7 @@ def prediction_points(prediction: sqlite3.Row, game: sqlite3.Row) -> int:
         and prediction["away_goals"] == game["away_score"]
     ):
         return 3
-    if prediction["choice"] == result:
+    if result_hit:
         return 1
     return 0
 
@@ -1705,13 +2396,12 @@ def user_stage_scores(user_id: int) -> dict[str, int]:
     scores = {stage[0]: 0 for stage in STAGES}
     rows = query_all(
         """
-        select predictions.*, games.stage_key, games.home_score, games.away_score, games.result
+        select predictions.*, games.stage_key, games.home_score, games.away_score, games.result, games.result_penalty_winner, games.result_status
         from predictions join games on games.id = predictions.game_id
         where predictions.user_id = ?
-          and (
-              games.result is not null
-              or (games.home_score is not null and games.away_score is not null)
-          )
+          and games.result_status in ('final', 'manual')
+          and games.home_score is not null
+          and games.away_score is not null
         """,
         (user_id,),
     )
@@ -1724,18 +2414,18 @@ def user_exact_scores(user_id: int) -> dict[str, int]:
     scores = {stage[0]: 0 for stage in STAGES}
     rows = query_all(
         """
-        select games.stage_key
+        select predictions.*, games.stage_key, games.home_score, games.away_score, games.result, games.result_penalty_winner, games.result_status
         from predictions join games on games.id = predictions.game_id
         where predictions.user_id = ?
+          and games.result_status in ('final', 'manual')
           and games.home_score is not null
           and games.away_score is not null
-          and predictions.home_goals = games.home_score
-          and predictions.away_goals = games.away_score
         """,
         (user_id,),
     )
     for row in rows:
-        scores[row["stage_key"]] += 1
+        if prediction_points(row, row) == 3:
+            scores[row["stage_key"]] += 1
     return scores
 
 
@@ -1743,13 +2433,12 @@ def user_hit_scores(user_id: int) -> dict[str, int]:
     scores = {stage[0]: 0 for stage in STAGES}
     rows = query_all(
         """
-        select predictions.*, games.stage_key, games.home_score, games.away_score, games.result
+        select predictions.*, games.stage_key, games.home_score, games.away_score, games.result, games.result_penalty_winner, games.result_status
         from predictions join games on games.id = predictions.game_id
         where predictions.user_id = ?
-          and (
-              games.result is not null
-              or (games.home_score is not null and games.away_score is not null)
-          )
+          and games.result_status in ('final', 'manual')
+          and games.home_score is not null
+          and games.away_score is not null
         """,
         (user_id,),
     )
@@ -1778,6 +2467,278 @@ def stage_leaderboards(include_admins: bool = False) -> dict[str, list[dict]]:
     return boards
 
 
+def ranking_image_payload() -> dict:
+    boards = [
+        ranking_image_board_payload(
+            "general",
+            "Tabla general",
+            "Suma de todas las etapas",
+            leaderboard(),
+        )
+    ]
+    for stage in get_stages():
+        boards.append(
+            ranking_image_board_payload(
+                stage["stage_key"],
+                stage["label"],
+                f"Tabla {stage['label']}",
+                leaderboard(stage["stage_key"]),
+            )
+        )
+    return {"boards": boards}
+
+
+def ranking_image_board_payload(key: str, title: str, subtitle: str, rows: list[dict]) -> dict:
+    return {
+        "key": key,
+        "title": title,
+        "subtitle": subtitle,
+        "rows": [
+            {
+                "rank": index,
+                "user": row["user"]["username"],
+                "marker": f"{row['hits']}/{row['exact']}",
+                "points": row["total"],
+            }
+            for index, row in enumerate(rows, start=1)
+        ],
+    }
+
+
+def historical_progress() -> dict:
+    users = query_all("select * from users where is_admin = 0 and is_debugger = 0 order by username")
+    games = query_all(
+        """
+        select *
+        from games
+        where result_status in ('final', 'manual')
+          and home_score is not null
+          and away_score is not null
+        order by starts_at, id
+        """
+    )
+    predictions = {
+        (row["user_id"], row["game_id"]): row
+        for row in query_all("select * from predictions")
+    }
+    totals = {
+        user["id"]: {
+            "user": user,
+            "total": 0,
+            "stage_total": 0,
+            "hits": 0,
+            "stage_hits": 0,
+            "exact": 0,
+            "stage_exact": 0,
+            "series": [0],
+            "stage_series": [0],
+        }
+        for user in users
+    }
+    groups_by_stage: dict[str, dict] = {}
+    labels = [{"text": "Inicio", "detail": "Inicio", "short": "Inicio", "stage_key": None, "stage_label": ""}]
+    latest_event = None
+    current_stage_key = None
+
+    for game in games:
+        stage_key = game["stage_key"]
+        if stage_key != current_stage_key:
+            current_stage_key = stage_key
+            for item in totals.values():
+                item["stage_total"] = 0
+                item["stage_hits"] = 0
+                item["stage_exact"] = 0
+        for user in users:
+            prediction = predictions.get((user["id"], game["id"]))
+            points = prediction_points(prediction, game) if prediction else 0
+            totals[user["id"]]["total"] += points
+            totals[user["id"]]["stage_total"] += points
+            if prediction and game_result(game) == prediction["choice"]:
+                totals[user["id"]]["hits"] += 1
+                totals[user["id"]]["stage_hits"] += 1
+            if prediction and prediction_points(prediction, game) == 3:
+                totals[user["id"]]["exact"] += 1
+                totals[user["id"]]["stage_exact"] += 1
+            totals[user["id"]]["series"].append(totals[user["id"]]["total"])
+            totals[user["id"]]["stage_series"].append(totals[user["id"]]["stage_total"])
+
+        board = sorted(
+            [
+                {
+                    "user": item["user"],
+                    "total": item["total"],
+                    "hits": item["hits"],
+                    "exact": item["exact"],
+                }
+                for item in totals.values()
+            ],
+            key=lambda row: (-row["total"], row["user"]["username"].lower()),
+        )
+        stage_board = sorted(
+            [
+                {
+                    "user": item["user"],
+                    "total": item["stage_total"],
+                    "hits": item["stage_hits"],
+                    "exact": item["stage_exact"],
+                }
+                for item in totals.values()
+            ],
+            key=lambda row: (-row["total"], row["user"]["username"].lower()),
+        )
+        penalty_suffix = f" ({choice_label(game, game_penalty_winner(game))} por penales)" if game_went_to_penalties(game) else ""
+        game_label = f"{game['home_team']} {game['home_score']}:{game['away_score']} {game['away_team']}{penalty_suffix}"
+        short_label = f"{game['home_team']} {game['home_score']}:{game['away_score']} {game['away_team']}"
+        event = {
+            "game": game,
+            "label": game_label,
+            "short_label": short_label,
+            "board": board,
+            "stage_board": stage_board,
+        }
+        current_stage_label = stage_label(stage_key)
+        labels.append(
+            {
+                "text": short_label,
+                "detail": game_label,
+                "short": short_label,
+                "stage_key": stage_key,
+                "stage_label": current_stage_label,
+            }
+        )
+        if stage_key not in groups_by_stage:
+            groups_by_stage[stage_key] = {"stage_key": stage_key, "label": current_stage_label, "events": []}
+        groups_by_stage[stage_key]["events"].append(event)
+        latest_event = event
+
+    groups = [groups_by_stage[key] for key, _label, _order, _bonus in STAGES if key in groups_by_stage]
+    return {
+        "groups": groups,
+        "chart": history_chart_model(users, totals, labels, series_key="series", total_key="total", point_label="pts acumulados"),
+        "stage_chart": history_chart_model(users, totals, labels, series_key="stage_series", total_key="stage_total", point_label="pts en la etapa"),
+        "latest_event": latest_event,
+    }
+
+
+def history_chart_model(
+    users: list[sqlite3.Row],
+    totals: dict[int, dict],
+    labels: list[dict],
+    series_key: str = "series",
+    total_key: str = "total",
+    point_label: str = "pts acumulados",
+) -> dict:
+    event_count = max(1, len(labels) - 1)
+    width = max(1320, 130 + event_count * 110)
+    height = 540
+    left = 52
+    right = 28
+    top = 32
+    bottom = 112
+    max_points = max([max(item[series_key] or [0]) for item in totals.values()] + [1])
+    steps = max(1, len(labels) - 1)
+    palette = [
+        "#86dec2",
+        "#f2d58a",
+        "#9ed0f5",
+        "#f0a2a2",
+        "#c4a7f5",
+        "#8bd17c",
+        "#f5a97f",
+        "#7dd3fc",
+        "#f7b7d2",
+        "#d8c36a",
+    ]
+
+    def point_for(index: int, value: int) -> tuple[float, float]:
+        x = left + ((width - left - right) * index / steps)
+        y = top + ((height - top - bottom) * (max_points - value) / max_points)
+        return x, y
+
+    series = []
+    for index, user in enumerate(users):
+        values = totals[user["id"]][series_key]
+        points = [point_for(point_index, value) for point_index, value in enumerate(values)]
+        series.append(
+            {
+                "user": user,
+                "color": palette[index % len(palette)],
+                "points": " ".join(f"{x:.1f},{y:.1f}" for x, y in points),
+                "dots": [
+                    {
+                        "x": f"{x:.1f}",
+                        "y": f"{y:.1f}",
+                        "value": values[point_index],
+                        "delta": values[point_index] - (values[point_index - 1] if point_index else 0),
+                        "label": labels[point_index]["detail"],
+                    }
+                    for point_index, (x, y) in enumerate(points)
+                ],
+                "total": totals[user["id"]][total_key],
+            }
+        )
+
+    ticks = []
+    tick_step = max(1, len(labels) // 10)
+    for index, label in enumerate(labels):
+        if index not in {0, len(labels) - 1} and index % tick_step != 0:
+            continue
+        x, _y = point_for(index, 0)
+        ticks.append({"x": f"{x:.1f}", "label": label["short"]})
+
+    stage_ranges = []
+    step_width = (width - left - right) / steps
+    index = 1
+    while index < len(labels):
+        stage_key = labels[index].get("stage_key")
+        if not stage_key:
+            index += 1
+            continue
+        start_index = index
+        while index + 1 < len(labels) and labels[index + 1].get("stage_key") == stage_key:
+            index += 1
+        end_index = index
+        start_x, _ = point_for(start_index, 0)
+        end_x, _ = point_for(end_index, 0)
+        x1 = max(left, start_x - step_width / 2)
+        x2 = min(width - right, end_x + step_width / 2)
+        stage_ranges.append(
+            {
+                "label": labels[start_index]["stage_label"],
+                "x1": f"{x1:.1f}",
+                "x2": f"{x2:.1f}",
+                "x": f"{((x1 + x2) / 2):.1f}",
+                "width": f"{max(0, x2 - x1):.1f}",
+            }
+        )
+        index += 1
+
+    grid = []
+    for step in range(0, 5):
+        value = round(max_points * step / 4)
+        _x, y = point_for(0, value)
+        grid.append({"value": value, "y": f"{y:.1f}"})
+
+    return {
+        "width": width,
+        "height": height,
+        "max_points": max_points,
+        "point_label": point_label,
+        "series": series,
+        "ticks": ticks,
+        "stage_ranges": stage_ranges,
+        "grid": grid,
+        "plot_top": top,
+        "plot_bottom": height - bottom,
+        "tick_y1": height - 110,
+        "tick_y2": height - 102,
+        "tick_label_y": height - 72,
+        "stage_band_y": height - 44,
+        "stage_band_height": 30,
+        "stage_label_y": height - 23,
+    }
+
+
 def prediction_progress(user_id: int) -> list[dict]:
     rows = []
     for stage in get_stages():
@@ -1794,16 +2755,81 @@ def prediction_progress(user_id: int) -> list[dict]:
     return rows
 
 
+def admin_prediction_audit(users: list[sqlite3.Row], stages: list[sqlite3.Row]) -> dict[int, dict]:
+    first_open_index = next((index for index, stage in enumerate(stages) if not stage["is_locked"]), None)
+    available_stages = stages if first_open_index is None else stages[: first_open_index + 1]
+    available_stage_keys = {stage["stage_key"] for stage in available_stages}
+    stage_totals = {
+        row["stage_key"]: row["total"]
+        for row in query_all("select stage_key, count(*) as total from games group by stage_key")
+    }
+    audit_stages = [stage for stage in stages if stage_totals.get(stage["stage_key"], 0) > 0]
+    stage_keys = [stage["stage_key"] for stage in audit_stages]
+    loaded_by_user_stage: dict[tuple[int, str], int] = {}
+    if stage_keys:
+        placeholders = ",".join("?" for _ in stage_keys)
+        rows = query_all(
+            f"""
+            select predictions.user_id, games.stage_key, count(*) as total
+            from predictions join games on games.id = predictions.game_id
+            where games.stage_key in ({placeholders})
+            group by predictions.user_id, games.stage_key
+            """,
+            tuple(stage_keys),
+        )
+        loaded_by_user_stage = {
+            (row["user_id"], row["stage_key"]): row["total"]
+            for row in rows
+        }
+
+    audit: dict[int, dict] = {}
+    for user in users:
+        stage_rows = []
+        loaded_total = 0
+        available_total = 0
+        tournament_loaded_total = 0
+        tournament_total = 0
+        for stage in audit_stages:
+            total = stage_totals.get(stage["stage_key"], 0)
+            loaded = loaded_by_user_stage.get((user["id"], stage["stage_key"]), 0)
+            is_available = stage["stage_key"] in available_stage_keys
+            tournament_loaded_total += loaded
+            tournament_total += total
+            if is_available:
+                loaded_total += loaded
+                available_total += total
+            stage_rows.append(
+                {
+                    "stage": stage,
+                    "loaded": loaded,
+                    "total": total,
+                    "available": is_available,
+                    "complete": is_available and total > 0 and loaded >= total,
+                }
+            )
+        audit[user["id"]] = {
+            "loaded": loaded_total,
+            "total": available_total,
+            "complete": available_total > 0 and loaded_total >= available_total,
+            "tournament_loaded": tournament_loaded_total,
+            "tournament_total": tournament_total,
+            "future_total": max(0, tournament_total - available_total),
+            "stages": stage_rows,
+        }
+    return audit
+
+
 def stage_winners() -> dict[str, dict]:
     winners = {}
+    boards = stage_leaderboards()
     for stage in get_stages():
-        board = leaderboard(stage["stage_key"])
-        top_points = board[0]["total"] if board else 0
+        board = boards.get(stage["stage_key"], [])
+        top_points = board[0]["points"] if board else 0
         if top_points <= 0:
-            winners[stage["stage_key"]] = {"points": 0, "users": []}
+            winners[stage["stage_key"]] = {"points": 0, "users": [], "count": 0}
             continue
-        users = [row["user"]["username"] for row in board if row["total"] == top_points]
-        winners[stage["stage_key"]] = {"points": top_points, "users": users}
+        users = [row["user"]["username"] for row in board if row["points"] == top_points]
+        winners[stage["stage_key"]] = {"points": top_points, "users": users, "count": len(users)}
     return winners
 
 
@@ -1837,17 +2863,20 @@ def seed_fake_predictions(stage_key: str) -> int:
         for game in games:
             home_goals = random.randint(0, 4)
             away_goals = random.randint(0, 4)
+            penalty_winner = random.choice(("home", "away")) if needs_penalty_winner(game["stage_key"], home_goals, away_goals) else None
+            choice = result_from_score_and_penalties(game["stage_key"], home_goals, away_goals, penalty_winner)
             g.db.execute(
                 """
-                insert into predictions (user_id, game_id, choice, home_goals, away_goals, updated_at)
-                values (?, ?, ?, ?, ?, ?)
+                insert into predictions (user_id, game_id, choice, home_goals, away_goals, penalty_winner, updated_at)
+                values (?, ?, ?, ?, ?, ?, ?)
                 on conflict(user_id, game_id) do update set
                     choice = excluded.choice,
                     home_goals = excluded.home_goals,
                     away_goals = excluded.away_goals,
+                    penalty_winner = excluded.penalty_winner,
                     updated_at = excluded.updated_at
                 """,
-                (user["id"], game["id"], result_from_score(home_goals, away_goals), home_goals, away_goals, utc_now()),
+                (user["id"], game["id"], choice, home_goals, away_goals, penalty_winner, utc_now()),
             )
             created += 1
     g.db.commit()
@@ -1859,9 +2888,11 @@ def seed_fake_results(stage_key: str) -> int:
     for game in games:
         home_score = random.randint(0, 4)
         away_score = random.randint(0, 4)
+        penalty_winner = random.choice(("home", "away")) if needs_penalty_winner(game["stage_key"], home_score, away_score) else None
+        result = result_from_score_and_penalties(game["stage_key"], home_score, away_score, penalty_winner)
         g.db.execute(
-            "update games set home_score = ?, away_score = ?, result = ? where id = ?",
-            (home_score, away_score, result_from_score(home_score, away_score), game["id"]),
+            "update games set home_score = ?, away_score = ?, result = ?, result_penalty_winner = ?, result_status = 'final' where id = ?",
+            (home_score, away_score, result, penalty_winner, game["id"]),
         )
     g.db.commit()
     return len(games)
@@ -1926,7 +2957,9 @@ def restore_sqlite_backup(uploaded) -> None:
         target = current_database_path()
         g.db.close()
         g.pop("db", None)
+        forget_runtime_schema(target)
         shutil.copy2(temp_path, target)
+        forget_runtime_schema(target)
     finally:
         temp_path.unlink(missing_ok=True)
 
@@ -1998,10 +3031,722 @@ def prize_rows() -> list[dict]:
     return rows
 
 
+def start_auto_results_worker(app: Flask) -> None:
+    global AUTO_RESULTS_WORKER_STARTED
+    if os.environ.get("PRODE_AUTO_RESULTS_WORKER", "1").lower() in {"0", "false", "no"}:
+        return
+    with AUTO_RESULTS_WORKER_LOCK:
+        if AUTO_RESULTS_WORKER_STARTED:
+            return
+        AUTO_RESULTS_WORKER_STARTED = True
+    thread = threading.Thread(target=auto_results_worker, args=(app,), name="auto-results-worker", daemon=True)
+    thread.start()
+
+
+def auto_results_worker(app: Flask) -> None:
+    sleep(5)
+    while True:
+        interval = int(SETTINGS_DEFAULTS["auto_results_interval_seconds"])
+        try:
+            with app.app_context():
+                g.db = get_db()
+                ensure_runtime_schema(g.db)
+                settings = get_settings()
+                interval = auto_int(settings.get("auto_results_interval_seconds"), interval, 30, 3600)
+                if setting_enabled(settings.get("auto_fixture_sync_enabled"), default=True):
+                    sync_fixture_if_due(settings)
+                if setting_enabled(settings.get("auto_results_enabled")):
+                    sync_auto_results_once(manual=False)
+        except Exception as exc:
+            try:
+                with app.app_context():
+                    g.db = get_db()
+                    ensure_runtime_schema(g.db)
+                    set_setting("auto_results_last_run_at", utc_now())
+                    set_setting("auto_results_last_summary", f"Error worker: {exc}")
+                    g.db.commit()
+            except Exception:
+                pass
+        sleep(max(30, interval))
+
+
+def sync_auto_results_once(manual: bool = False) -> dict:
+    settings = get_settings()
+    stats = {
+        "checked": 0,
+        "due": 0,
+        "updated": 0,
+        "schedule_updated": 0,
+        "unchanged": 0,
+        "missing": 0,
+        "skipped": 0,
+        "sources": [],
+        "errors": [],
+    }
+    if not manual and not setting_enabled(settings.get("auto_results_enabled")):
+        return stats
+
+    games = auto_results_due_games(settings)
+    stats["due"] = len(games)
+    if not games:
+        update_auto_results_status(stats)
+        return stats
+
+    source_names = auto_result_source_names(settings)
+    snapshots_by_source: dict[str, list[dict]] = {}
+    for source in source_names:
+        try:
+            snapshots = load_auto_result_source(source, games, settings)
+            snapshots_by_source[source] = snapshots
+            stats["sources"].append(f"{source}:{len(snapshots)}")
+        except Exception as exc:
+            stats["errors"].append(f"{source}: {friendly_source_error(source, exc)}")
+
+    stats["schedule_updated"] = reconcile_auto_kickoffs(snapshots_by_source, source_names, settings)
+    if stats["schedule_updated"]:
+        games = auto_results_due_games(settings)
+        stats["due"] = len(games)
+
+    apply_provisional = setting_enabled(settings.get("auto_results_apply_provisional"), default=True)
+    for game in games:
+        stats["checked"] += 1
+        snapshot = find_auto_result_snapshot(game, snapshots_by_source, source_names)
+        if not snapshot:
+            stats["missing"] += 1
+            continue
+        kickoff_updated = update_game_kickoff_from_auto_snapshot(game, snapshot)
+        if snapshot.get("home_score") is None or snapshot.get("away_score") is None:
+            if kickoff_updated:
+                stats["updated"] += 1
+            else:
+                stats["missing"] += 1
+            continue
+        if not snapshot.get("started") and not snapshot.get("completed"):
+            if clear_unstarted_auto_result(game, snapshot):
+                stats["updated"] += 1
+            elif kickoff_updated:
+                stats["updated"] += 1
+            else:
+                stats["missing"] += 1
+            continue
+        if not apply_provisional and not snapshot.get("completed"):
+            stats["skipped"] += 1
+            continue
+        if update_game_from_auto_snapshot(game, snapshot):
+            stats["updated"] += 1
+        elif kickoff_updated:
+            stats["updated"] += 1
+        else:
+            stats["unchanged"] += 1
+
+    update_auto_results_status(stats)
+    g.db.commit()
+    return stats
+
+
+def auto_results_flash_message(stats: dict) -> str:
+    base = (
+        f"Auto resultados: {stats['updated']} resultados actualizados, "
+        f"{stats.get('schedule_updated', 0)} horarios, {stats['unchanged']} sin cambios, "
+        f"{stats['missing']} sin dato, {stats['skipped']} omitidos."
+    )
+    if stats["errors"]:
+        return f"{base} Errores: {' | '.join(stats['errors'][:3])}"
+    return base
+
+
+def update_auto_results_status(stats: dict) -> None:
+    summary = auto_results_flash_message(stats)
+    set_setting("auto_results_last_run_at", utc_now())
+    set_setting("auto_results_last_summary", summary)
+
+
+def set_setting(key: str, value: str) -> None:
+    g.db.execute(
+        "insert into settings (key, value) values (?, ?) on conflict(key) do update set value = excluded.value",
+        (key, value),
+    )
+
+
+def sync_fixture_if_due(settings: dict) -> None:
+    interval_minutes = auto_int(settings.get("auto_fixture_sync_interval_minutes"), 30, 5, 1440)
+    last_run = parse_iso_datetime(settings.get("auto_fixture_sync_last_run_at"))
+    now = datetime.now(timezone.utc)
+    if last_run and now - last_run < timedelta(minutes=interval_minutes):
+        return
+    try:
+        stats = sync_promiedos_fixture()
+        summary = (
+            f"Fixture auto: {stats['created']} creados, "
+            f"{stats['updated']} actualizados, {stats['skipped']} omitidos."
+        )
+    except Exception as exc:
+        summary = f"Error fixture auto: {friendly_source_error('promiedos', exc)}"
+    set_setting("auto_fixture_sync_last_run_at", utc_now())
+    set_setting("auto_fixture_sync_last_summary", summary)
+    g.db.commit()
+
+
+def parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def auto_results_due_games(settings: dict) -> list[sqlite3.Row]:
+    stage_keys = auto_result_stage_keys(settings)
+    placeholders = ",".join("?" for _ in stage_keys)
+    games = query_all(
+        f"""
+        select *
+        from games
+        where stage_key in ({placeholders})
+        order by starts_at, id
+        """,
+        tuple(stage_keys),
+    )
+    now = datetime.now(APP_TIMEZONE)
+    start_before = timedelta(minutes=auto_int(settings.get("auto_results_start_before_minutes"), 0, 0, 30))
+    halftime_minutes = auto_int(settings.get("auto_results_halftime_minutes"), 45, 30, 70)
+    halftime_retry_minutes = auto_int(settings.get("auto_results_halftime_retry_minutes"), 20, 1, 60)
+    fulltime_minutes = auto_int(settings.get("auto_results_fulltime_minutes"), 90, 70, 140)
+    fulltime_retry_minutes = auto_int(settings.get("auto_results_fulltime_retry_minutes"), 45, 1, 120)
+    catchup_hours = auto_int(settings.get("auto_results_catchup_hours"), 72, 1, 240)
+    due = []
+    for game in games:
+        starts_at = parse_game_start(game["starts_at"])
+        if not starts_at:
+            continue
+        result_status = game["result_status"] if "result_status" in game.keys() else "pending"
+        if result_status == "manual":
+            continue
+        halftime_start = starts_at + timedelta(minutes=halftime_minutes) - start_before
+        halftime_end = starts_at + timedelta(minutes=halftime_minutes + halftime_retry_minutes)
+        fulltime_start = starts_at + timedelta(minutes=fulltime_minutes) - start_before
+        fulltime_end = starts_at + timedelta(minutes=fulltime_minutes + fulltime_retry_minutes)
+        catchup_end = starts_at + timedelta(hours=catchup_hours)
+        in_halftime_window = halftime_start <= now <= halftime_end
+        in_fulltime_window = fulltime_start <= now <= fulltime_end
+        in_catchup_window = now >= starts_at + timedelta(minutes=fulltime_minutes)
+        if result_status == "final" and now > catchup_end:
+            in_catchup_window = False
+        if in_halftime_window or in_fulltime_window or in_catchup_window:
+            due.append(game)
+    return due
+
+
+def auto_result_stage_keys(settings: dict) -> list[str]:
+    keys = []
+    for raw in (settings.get("auto_results_stage_keys") or "").split(","):
+        key = raw.strip()
+        if key in AUTO_RESULT_STAGE_LIMIT and key not in keys:
+            keys.append(key)
+    return keys or ["fecha_1", "fecha_2", "fecha_3"]
+
+
+def auto_result_source_names(settings: dict) -> list[str]:
+    names = []
+    for raw in (settings.get("auto_results_sources") or "").split(","):
+        name = raw.strip().lower()
+        if name in AUTO_RESULT_SOURCES and name not in names:
+            names.append(name)
+    return names or ["espn", "promiedos", "worldcup26", "upbound"]
+
+
+def load_auto_result_source(source: str, games: list[sqlite3.Row], settings: dict) -> list[dict]:
+    if source == "promiedos":
+        return load_promiedos_auto_snapshots(settings)
+    if source == "espn":
+        return load_espn_auto_snapshots(games, settings)
+    if source == "worldcup26":
+        return load_worldcup26_auto_snapshots(settings)
+    if source == "upbound":
+        return load_upbound_auto_snapshots(settings)
+    raise ValueError(f"Fuente no soportada: {source}")
+
+
+def load_promiedos_auto_snapshots(settings: dict) -> list[dict]:
+    snapshots = []
+    seen: set[str] = set()
+    for round_number in promiedos_rounds(settings.get("promiedos_group_rounds", "1,2,3")):
+        url = settings["promiedos_games_url_template"].format(round=round_number)
+        data = fetch_promiedos_json(url, settings.get("promiedos_x_ver", "1.11.7.5"))
+        for raw_game in data.get("games", []):
+            stage_key = promiedos_stage_key(raw_game.get("stage_round_name", f"Fecha {round_number}"))
+            if stage_key not in AUTO_RESULT_STAGE_LIMIT:
+                continue
+            parsed = parse_promiedos_game(stage_key, raw_game)
+            if not parsed or parsed["external_id"] in seen:
+                continue
+            seen.add(parsed["external_id"])
+            snapshots.append(auto_snapshot_from_promiedos(parsed, raw_game))
+    return snapshots
+
+
+def auto_snapshot_from_promiedos(parsed: dict, raw_game: dict) -> dict:
+    home_score = parsed["home_score"]
+    away_score = parsed["away_score"]
+    status_text = auto_status_text(raw_game)
+    completed = promiedos_completed(raw_game)
+    started = completed or promiedos_started(raw_game)
+    penalty_winner = penalty_winner_for_result(parsed["stage_key"], home_score, away_score, parsed["result"]) if completed else None
+    return {
+        "source": "promiedos",
+        "source_id": parsed["external_id"],
+        "home": parsed["home_team"],
+        "away": parsed["away_team"],
+        "home_score": home_score,
+        "away_score": away_score,
+        "result": parsed["result"],
+        "result_penalty_winner": penalty_winner,
+        "completed": completed,
+        "started": started,
+        "status": status_text,
+        "kickoff": parse_game_start(parsed["starts_at"]),
+    }
+
+
+def load_espn_auto_snapshots(games: list[sqlite3.Row], settings: dict) -> list[dict]:
+    base_url = (settings.get("espn_scoreboard_url") or SETTINGS_DEFAULTS["espn_scoreboard_url"]).strip()
+    dates = sorted(
+        {
+            (parse_game_start(game["starts_at"]) or datetime.now(APP_TIMEZONE)).strftime("%Y%m%d")
+            for game in games
+        }
+    )
+    snapshots = []
+    for date in dates:
+        data = fetch_json_url(f"{base_url}?dates={date}")
+        for event in data.get("events", []):
+            competition = first_item(event.get("competitions"))
+            competitors = competition.get("competitors", []) if isinstance(competition, dict) else []
+            home = first_matching(competitors, "home")
+            away = first_matching(competitors, "away")
+            if not home or not away:
+                continue
+            status = competition.get("status", {}) if isinstance(competition, dict) else {}
+            status_type = status.get("type", {}) if isinstance(status, dict) else {}
+            home_team = home.get("team", {})
+            away_team = away.get("team", {})
+            kickoff = parse_source_datetime(competition.get("date") or event.get("date"))
+            period = safe_int(status.get("period")) or 0
+            home_score = safe_int(home.get("score"))
+            away_score = safe_int(away.get("score"))
+            completed = bool(status_type.get("completed"))
+            winner = None
+            if completed:
+                if home.get("winner") is True:
+                    winner = "home"
+                elif away.get("winner") is True:
+                    winner = "away"
+            result = None
+            if home_score is not None and away_score is not None:
+                result = winner if home_score == away_score and winner else result_from_score(home_score, away_score)
+            snapshots.append(
+                {
+                    "source": "espn",
+                    "source_id": str(event.get("id") or ""),
+                    "home": home_team.get("displayName") or home_team.get("name") or "",
+                    "away": away_team.get("displayName") or away_team.get("name") or "",
+                    "home_score": home_score,
+                    "away_score": away_score,
+                    "result": result,
+                    "result_penalty_winner": winner if home_score is not None and away_score is not None and home_score == away_score else None,
+                    "completed": completed,
+                    "started": status_type.get("state") != "pre" or period > 0,
+                    "status": first_non_empty(status_type.get("shortDetail"), status_type.get("detail"), status_type.get("description")),
+                    "kickoff": kickoff,
+                }
+            )
+    return snapshots
+
+
+def load_worldcup26_auto_snapshots(settings: dict) -> list[dict]:
+    url = (settings.get("worldcup26_api_url") or SETTINGS_DEFAULTS["worldcup26_api_url"]).strip()
+    data = fetch_json_url(url)
+    snapshots = []
+    for game in data.get("games", []):
+        home = first_non_empty(game.get("home_team_name_en"), game.get("home_team_label"))
+        away = first_non_empty(game.get("away_team_name_en"), game.get("away_team_label"))
+        if not home or not away:
+            continue
+        status = str(game.get("time_elapsed") or "")
+        completed = str(game.get("finished") or "").lower() == "true" or "finished" in status.lower()
+        home_score = safe_int(game.get("home_score"))
+        away_score = safe_int(game.get("away_score"))
+        snapshots.append(
+            {
+                "source": "worldcup26",
+                "source_id": str(game.get("id") or ""),
+                "home": home,
+                "away": away,
+                "home_score": home_score,
+                "away_score": away_score,
+                "result": result_from_score(home_score, away_score) if home_score is not None and away_score is not None else None,
+                "result_penalty_winner": None,
+                "completed": completed,
+                "started": completed or status.lower() not in {"", "notstarted", "not started"},
+                "status": status,
+                "kickoff": None,
+            }
+        )
+    return snapshots
+
+
+def load_upbound_auto_snapshots(settings: dict) -> list[dict]:
+    url = (settings.get("upbound_worldcup_url") or SETTINGS_DEFAULTS["upbound_worldcup_url"]).strip()
+    data = fetch_json_url(url)
+    snapshots = []
+    for raw in data.get("matches", []):
+        home = raw.get("team1") or ""
+        away = raw.get("team2") or ""
+        if not home or not away:
+            continue
+        ft = ((raw.get("score") or {}).get("ft") or [])
+        completed = isinstance(ft, list) and len(ft) >= 2
+        home_score = safe_int(ft[0]) if completed else None
+        away_score = safe_int(ft[1]) if completed else None
+        snapshots.append(
+            {
+                "source": "upbound",
+                "source_id": "",
+                "home": home,
+                "away": away,
+                "home_score": home_score,
+                "away_score": away_score,
+                "result": result_from_score(home_score, away_score) if home_score is not None and away_score is not None else None,
+                "result_penalty_winner": None,
+                "completed": completed,
+                "started": completed,
+                "status": "FT" if completed else "scheduled/no live score",
+                "kickoff": parse_upbound_datetime(raw),
+            }
+        )
+    return snapshots
+
+
+def find_auto_result_snapshot(game: sqlite3.Row, snapshots_by_source: dict[str, list[dict]], source_order: list[str]) -> dict | None:
+    matches = []
+    for source_index, source in enumerate(source_order):
+        for snapshot in snapshots_by_source.get(source, []):
+            oriented = orient_auto_snapshot_for_game(game, snapshot)
+            if oriented:
+                oriented = dict(oriented)
+                oriented["_source_order"] = source_index
+                matches.append(oriented)
+    if not matches:
+        return None
+    return max(matches, key=auto_snapshot_priority)
+
+
+def auto_snapshot_priority(snapshot: dict) -> tuple[int, int, int, int]:
+    has_score = snapshot.get("home_score") is not None and snapshot.get("away_score") is not None
+    return (
+        1 if snapshot.get("completed") else 0,
+        1 if snapshot.get("started") else 0,
+        1 if has_score else 0,
+        -int(snapshot.get("_source_order", 0)),
+    )
+
+
+def reconcile_auto_kickoffs(
+    snapshots_by_source: dict[str, list[dict]],
+    source_names: list[str],
+    settings: dict,
+) -> int:
+    stage_keys = auto_result_stage_keys(settings)
+    placeholders = ",".join("?" for _ in stage_keys)
+    games = query_all(
+        f"""
+        select *
+        from games
+        where stage_key in ({placeholders})
+        order by starts_at, id
+        """,
+        tuple(stage_keys),
+    )
+    updated = 0
+    for game in games:
+        snapshot = find_auto_result_snapshot(game, snapshots_by_source, source_names)
+        if snapshot and update_game_kickoff_from_auto_snapshot(game, snapshot):
+            updated += 1
+    return updated
+
+
+def orient_auto_snapshot_for_game(game: sqlite3.Row, snapshot: dict) -> dict | None:
+    game_external_id = str(game["external_id"] or "")
+    if game_external_id and snapshot.get("source") == "promiedos" and game_external_id == str(snapshot.get("source_id") or ""):
+        return snapshot
+    game_start = parse_game_start(game["starts_at"])
+    source_start = snapshot.get("kickoff")
+    if game_start and source_start and abs((game_start - source_start).total_seconds()) > 18 * 3600:
+        return None
+    game_home = auto_team_key(game["home_team"])
+    game_away = auto_team_key(game["away_team"])
+    source_home = auto_team_key(snapshot.get("home", ""))
+    source_away = auto_team_key(snapshot.get("away", ""))
+    if game_home == source_home and game_away == source_away:
+        return snapshot
+    if game_home == source_away and game_away == source_home:
+        oriented = dict(snapshot)
+        oriented["home"] = snapshot.get("away")
+        oriented["away"] = snapshot.get("home")
+        oriented["home_score"] = snapshot.get("away_score")
+        oriented["away_score"] = snapshot.get("home_score")
+        if snapshot.get("result") == "home":
+            oriented["result"] = "away"
+        elif snapshot.get("result") == "away":
+            oriented["result"] = "home"
+        if snapshot.get("result_penalty_winner") == "home":
+            oriented["result_penalty_winner"] = "away"
+        elif snapshot.get("result_penalty_winner") == "away":
+            oriented["result_penalty_winner"] = "home"
+        return oriented
+    return None
+
+
+def update_game_from_auto_snapshot(game: sqlite3.Row, snapshot: dict) -> bool:
+    home_score = snapshot["home_score"]
+    away_score = snapshot["away_score"]
+    result = result_from_score(home_score, away_score)
+    result_penalty_winner = None
+    if bool(snapshot.get("completed")):
+        result_penalty_winner = penalty_winner_for_result(
+            game["stage_key"],
+            home_score,
+            away_score,
+            snapshot.get("result_penalty_winner") or snapshot.get("result") or result,
+        )
+        if result_penalty_winner:
+            result = result_penalty_winner
+    result_status = source_result_status(
+        bool(snapshot.get("completed")),
+        result,
+        bool(snapshot.get("started") or snapshot.get("completed")),
+    )
+    current_status = game["result_status"] if "result_status" in game.keys() else "pending"
+    if (
+        game["home_score"] == home_score
+        and game["away_score"] == away_score
+        and game["result"] == result
+        and row_value(game, "result_penalty_winner") == result_penalty_winner
+        and current_status == result_status
+    ):
+        return False
+    g.db.execute(
+        "update games set home_score = ?, away_score = ?, result = ?, result_penalty_winner = ?, result_status = ? where id = ?",
+        (home_score, away_score, result, result_penalty_winner, result_status, game["id"]),
+    )
+    penalty_detail = f"; {choice_label(game, result_penalty_winner)} por penales" if result_penalty_winner else ""
+    log_event(
+        "auto_result_update",
+        f"{stage_label(game['stage_key'])}: {game['home_team']} {home_score}-{away_score} {game['away_team']} "
+        f"({snapshot.get('source')}; {result_status}{penalty_detail}; {snapshot.get('status') or 'sin estado'})",
+    )
+    return True
+
+
+def clear_unstarted_auto_result(game: sqlite3.Row, snapshot: dict) -> bool:
+    current_status = game["result_status"] if "result_status" in game.keys() else "pending"
+    if current_status != "live":
+        return False
+    if game["home_score"] is None and game["away_score"] is None and game["result"] is None:
+        return False
+    g.db.execute(
+        "update games set home_score = null, away_score = null, result = null, result_penalty_winner = null, result_status = 'pending' where id = ?",
+        (game["id"],),
+    )
+    log_event(
+        "auto_result_clear",
+        f"{stage_label(game['stage_key'])}: {game['home_team']} vs {game['away_team']} vuelve a pendiente "
+        f"({snapshot.get('source')}; {snapshot.get('status') or 'no iniciado'})",
+    )
+    return True
+
+
+def update_game_kickoff_from_auto_snapshot(game: sqlite3.Row, snapshot: dict) -> bool:
+    kickoff = snapshot.get("kickoff")
+    current_row = query_one("select starts_at from games where id = ?", (game["id"],))
+    current_start_text = current_row["starts_at"] if current_row else game["starts_at"]
+    current_start = parse_game_start(current_start_text)
+    if not kickoff or not current_start:
+        return False
+    if abs((kickoff - current_start).total_seconds()) < 15 * 60:
+        return False
+    starts_at = kickoff.strftime("%Y-%m-%d %H:%M")
+    g.db.execute("update games set starts_at = ? where id = ?", (starts_at, game["id"]))
+    log_event(
+        "auto_kickoff_update",
+        f"{stage_label(game['stage_key'])}: {game['home_team']} vs {game['away_team']} horario {current_start_text} -> {starts_at} "
+        f"({snapshot.get('source')})",
+    )
+    return True
+
+
+def fetch_json_url(url: str, headers: dict | None = None, timeout: int = 20) -> dict:
+    request_obj = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json,text/plain,*/*",
+            "User-Agent": "ProdeMundial2026/auto-results",
+            **(headers or {}),
+        },
+    )
+    with urllib.request.urlopen(request_obj, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def auto_team_key(name: str) -> str:
+    normalized = normalize_team_name(name)
+    normalized = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+    return AUTO_TEAM_ALIASES.get(normalized, normalized)
+
+
+def parse_source_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(APP_TIMEZONE)
+
+
+def parse_upbound_datetime(raw: dict) -> datetime | None:
+    date = str(raw.get("date") or "")
+    time_text = str(raw.get("time") or "")
+    match = re.match(r"^(?P<h>\d{1,2}):(?P<m>\d{2})\s+UTC(?P<sign>[+-])(?P<offset>\d{1,2})$", time_text)
+    if not match:
+        return None
+    try:
+        day = datetime.strptime(date, "%Y-%m-%d")
+        hour = int(match.group("h"))
+        minute = int(match.group("m"))
+        offset = int(match.group("offset"))
+    except ValueError:
+        return None
+    if match.group("sign") == "-":
+        offset *= -1
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=timezone(timedelta(hours=offset))).astimezone(APP_TIMEZONE)
+
+
+def auto_status_text(value: dict) -> str:
+    parts = []
+    for key in ("status", "status_name", "state", "time", "time_elapsed", "game_time", "minute"):
+        raw = value.get(key)
+        if isinstance(raw, dict):
+            for subkey in ("name", "short_name", "symbol_name", "description", "detail"):
+                text = str(raw.get(subkey) or "").strip()
+                if text:
+                    parts.append(text)
+            enum = raw.get("enum")
+            if enum is not None:
+                parts.append(str(enum))
+            continue
+        text = str(raw or "").strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts)
+
+
+def promiedos_status_enum(game: dict) -> int | None:
+    status = game.get("status")
+    if isinstance(status, dict):
+        return safe_int(status.get("enum"))
+    return None
+
+
+def promiedos_completed(game: dict) -> bool:
+    status_enum = promiedos_status_enum(game)
+    if status_enum == 3:
+        return True
+    status_text = auto_status_text(game).lower()
+    return "finalizado" in status_text or re.search(r"\b(final|fin)\b", status_text) is not None
+
+
+def promiedos_started(game: dict) -> bool:
+    status_enum = promiedos_status_enum(game)
+    if status_enum is not None:
+        return status_enum >= 2
+    status_text = auto_status_text(game).lower()
+    if any(token in status_text for token in ("programado", "no iniciado", "not started", "scheduled")):
+        return False
+    scores = game.get("scores") or []
+    return safe_score(scores, 0) is not None and safe_score(scores, 1) is not None
+
+
+def source_result_status(completed: bool, result: str | None, started: bool = True) -> str:
+    if completed and result:
+        return "final"
+    if started and result:
+        return "live"
+    return "pending"
+
+
+def first_item(value):
+    return value[0] if isinstance(value, list) and value else {}
+
+
+def first_matching(items: list, home_away: str) -> dict | None:
+    for item in items:
+        if item.get("homeAway") == home_away:
+            return item
+    return None
+
+
+def first_non_empty(*values) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text and text.lower() != "none":
+            return text
+    return ""
+
+
+def safe_int(value) -> int | None:
+    if isinstance(value, dict):
+        value = value.get("score") or value.get("value")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def setting_enabled(value: str | None, default: bool = False) -> bool:
+    if value is None or value == "":
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "si", "sí"}
+
+
+def auto_int(value: str | None, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(str(value or "").strip())
+    except ValueError:
+        parsed = default
+    return min(max(parsed, minimum), maximum)
+
+
+def friendly_source_error(source: str, exc: Exception) -> str:
+    text = str(exc)
+    if source == "worldcup26" and "SSL" in repr(exc).upper():
+        return "fallo SSL/TLS del servidor"
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    return text[:180]
+
+
 def sync_promiedos_fixture() -> dict[str, int]:
     settings = get_settings()
     stats = {"created": 0, "updated": 0, "skipped": 0}
     seen_external_ids: set[str] = set()
+    seen_stage_keys: set[str] = set()
     for round_number in promiedos_rounds(settings.get("promiedos_group_rounds", "1,2,3")):
         url = settings["promiedos_games_url_template"].format(round=round_number)
         data = fetch_promiedos_json(url, settings.get("promiedos_x_ver", "1.11.7.5"))
@@ -2010,7 +3755,8 @@ def sync_promiedos_fixture() -> dict[str, int]:
             if not stage_key:
                 stats["skipped"] += 1
                 continue
-            import_promiedos_game(game, stage_key, stats, seen_external_ids)
+            if import_promiedos_game(game, stage_key, stats, seen_external_ids):
+                seen_stage_keys.add(stage_key)
     data = fetch_promiedos_json(settings["fixture_api_url"], settings.get("promiedos_x_ver", "1.11.7.5"))
     games_section = data.get("games", {})
     if not isinstance(games_section, dict):
@@ -2023,9 +3769,11 @@ def sync_promiedos_fixture() -> dict[str, int]:
             stats["skipped"] += len(fixture_filter.get("games", []))
             continue
         for game in fixture_filter.get("games", []):
-            import_promiedos_game(game, stage_key, stats, seen_external_ids)
+            if import_promiedos_game(game, stage_key, stats, seen_external_ids):
+                seen_stage_keys.add(stage_key)
     if seen_external_ids:
         remove_seed_games()
+        remove_bracket_placeholders(seen_stage_keys)
     g.db.commit()
     return stats
 
@@ -2039,21 +3787,32 @@ def promiedos_rounds(value: str) -> list[int]:
     return rounds or [1, 2, 3]
 
 
-def import_promiedos_game(game: dict, stage_key: str, stats: dict[str, int], seen_external_ids: set[str]) -> None:
+def import_promiedos_game(game: dict, stage_key: str, stats: dict[str, int], seen_external_ids: set[str]) -> bool:
     parsed = parse_promiedos_game(stage_key, game)
     if not parsed:
         stats["skipped"] += 1
-        return
+        return False
     if parsed["external_id"] in seen_external_ids:
-        return
+        return True
     seen_external_ids.add(parsed["external_id"])
-    existing = query_one("select id from games where external_id = ?", (parsed["external_id"],))
+    existing = query_one("select id, fixture_manual from games where external_id = ?", (parsed["external_id"],))
+    result_status = source_result_status(promiedos_completed(game), parsed["result"], promiedos_started(game))
+    penalty_winner = penalty_winner_for_result(
+        parsed["stage_key"],
+        parsed["home_score"],
+        parsed["away_score"],
+        parsed["result"],
+    ) if result_status == "final" else None
+    result = penalty_winner or parsed["result"]
     if existing:
+        if existing["fixture_manual"]:
+            stats["skipped"] += 1
+            return True
         g.db.execute(
             """
             update games
             set stage_key = ?, starts_at = ?, home_team = ?, away_team = ?,
-                home_score = ?, away_score = ?, result = ?
+                home_score = ?, away_score = ?, result = ?, result_penalty_winner = ?, result_status = ?
             where id = ?
             """,
             (
@@ -2063,16 +3822,19 @@ def import_promiedos_game(game: dict, stage_key: str, stats: dict[str, int], see
                 parsed["away_team"],
                 parsed["home_score"],
                 parsed["away_score"],
-                parsed["result"],
+                result,
+                penalty_winner,
+                result_status,
                 existing["id"],
             ),
         )
         stats["updated"] += 1
+        return True
     else:
         g.db.execute(
             """
-            insert into games (external_id, stage_key, starts_at, home_team, away_team, home_score, away_score, result)
-            values (?, ?, ?, ?, ?, ?, ?, ?)
+            insert into games (external_id, stage_key, starts_at, home_team, away_team, home_score, away_score, result, result_penalty_winner, result_status)
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 parsed["external_id"],
@@ -2082,10 +3844,13 @@ def import_promiedos_game(game: dict, stage_key: str, stats: dict[str, int], see
                 parsed["away_team"],
                 parsed["home_score"],
                 parsed["away_score"],
-                parsed["result"],
+                result,
+                penalty_winner,
+                result_status,
             ),
         )
         stats["created"] += 1
+        return True
 
 
 def remove_seed_games() -> None:
@@ -2099,13 +3864,22 @@ def remove_seed_games() -> None:
         )
 
 
+def remove_bracket_placeholders(stage_keys: set[str]) -> None:
+    bracket_stage_keys = {key for key, _label, order, _bonus in STAGES if order >= 4}
+    for stage_key in sorted(stage_keys & bracket_stage_keys):
+        g.db.execute(
+            "delete from games where stage_key = ? and external_id like ? and fixture_manual = 0",
+            (stage_key, f"visual-bracket-{stage_key}-%"),
+        )
+
+
 def seed_bracket_placeholders(db: sqlite3.Connection) -> None:
     for index, (stage_key, starts_at, home_team, away_team) in enumerate(BRACKET_PLACEHOLDER_GAMES, start=1):
         external_id = f"visual-bracket-{stage_key}-{index}"
         existing = db.execute("select id from games where external_id = ?", (external_id,)).fetchone()
         if existing:
             db.execute(
-                "update games set stage_key = ?, starts_at = ?, home_team = ?, away_team = ? where external_id = ?",
+                "update games set stage_key = ?, starts_at = ?, home_team = ?, away_team = ? where external_id = ? and fixture_manual = 0",
                 (stage_key, starts_at, home_team, away_team, external_id),
             )
         else:
@@ -2157,7 +3931,7 @@ def parse_promiedos_game(stage_key: str, game: dict) -> dict | None:
         "away_team": teams[1].get("name", "Visitante"),
         "home_score": home_score,
         "away_score": away_score,
-        "result": promiedos_result(game, home_score, away_score),
+        "result": promiedos_result(stage_key, game, home_score, away_score),
     }
 
 
@@ -2183,7 +3957,12 @@ def safe_score(scores: list, index: int) -> int | None:
         return None
 
 
-def promiedos_result(game: dict, home_score: int | None, away_score: int | None) -> str | None:
+def promiedos_result(stage_key: str | None, game: dict, home_score: int | None, away_score: int | None) -> str | None:
+    if home_score is not None and away_score is not None:
+        if home_score != away_score:
+            return result_from_score(home_score, away_score)
+        if not needs_penalty_winner(stage_key, home_score, away_score):
+            return "draw"
     winner = game.get("winner")
     if winner == 0:
         return "home"
@@ -2238,7 +4017,10 @@ def init_db() -> None:
                 away_team text not null,
                 home_score integer,
                 away_score integer,
-                result text
+                result text,
+                result_penalty_winner text,
+                result_status text not null default 'pending',
+                fixture_manual integer not null default 0
             );
             create table if not exists predictions (
                 id integer primary key autoincrement,
@@ -2247,6 +4029,7 @@ def init_db() -> None:
                 choice text not null,
                 home_goals integer,
                 away_goals integer,
+                penalty_winner text,
                 updated_at text not null,
                 unique(user_id, game_id)
             );
@@ -2283,14 +4066,22 @@ def init_db() -> None:
             """
         )
         ensure_column(db, "games", "external_id", "text")
+        ensure_column(db, "games", "result_status", "text not null default 'pending'")
+        ensure_column(db, "games", "result_penalty_winner", "text")
+        mark_existing_results_final(db)
         ensure_column(db, "users", "last_seen_at", "text")
         ensure_column(db, "users", "chat_seen_at", "text")
         ensure_column(db, "users", "is_debugger", "integer not null default 0")
         ensure_column(db, "users", "force_password_change", "integer not null default 0")
         ensure_column(db, "users", "accepted_terms_at", "text")
+        ensure_column(db, "games", "external_id", "text")
+        ensure_column(db, "games", "result_status", "text not null default 'pending'")
+        ensure_column(db, "games", "result_penalty_winner", "text")
+        ensure_column(db, "games", "fixture_manual", "integer not null default 0")
         ensure_column(db, "predictions", "home_goals", "integer")
         ensure_column(db, "predictions", "away_goals", "integer")
-        db.execute("create unique index if not exists idx_games_external_id on games(external_id) where external_id is not null")
+        ensure_column(db, "predictions", "penalty_winner", "text")
+        ensure_indexes(db)
         for key, label, order, is_bonus in STAGES:
             db.execute(
                 """
@@ -2302,6 +4093,7 @@ def init_db() -> None:
             )
         for key, value in SETTINGS_DEFAULTS.items():
             db.execute("insert or ignore into settings (key, value) values (?, ?)", (key, value))
+        ensure_settings_defaults(db)
         db.execute(
             """
             update settings

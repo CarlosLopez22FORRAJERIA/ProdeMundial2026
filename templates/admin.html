@@ -21,6 +21,11 @@
         <span class="hint">JSON con usuarios, partidos, picks, chat y configuracion.</span>
         <button>Descargar JSON</button>
       </form>
+      <div class="debug-card">
+        <strong>Imagen ranking</strong>
+        <span class="hint">Genera una tabla PNG lista para compartir.</span>
+        <a class="button-link" href="{{ url_for('admin_ranking_image') }}">Abrir generador</a>
+      </div>
       <form class="debug-card" method="post" action="{{ url_for('admin_restore_backup') }}" enctype="multipart/form-data" onsubmit="return confirm('Restaurar este backup reemplaza la base activa. Continuar?')">
         <strong>Restaurar backup</strong>
         <span class="hint">Subi un SQLite descargado. Antes de pisar, se guarda una copia previa.</span>
@@ -42,7 +47,15 @@
   </details>
 
   <details class="card admin-block" open>
-    <summary>Usuarios</summary>
+    <summary class="admin-users-summary">
+      <span>Usuarios</span>
+      <span class="admin-summary-badges">
+        <b>Usuarios {{ users|length }}</b>
+        <b>Habilitadas {{ prediction_audit_summary.total }}</b>
+        <b>Total fixture {{ prediction_audit_summary.tournament_total }}</b>
+        <b>Futuras {{ prediction_audit_summary.future_total }}</b>
+      </span>
+    </summary>
     <form class="inline-form" method="post" action="{{ url_for('admin_create_user') }}">
       <input name="username" placeholder="Usuario" required>
       <input name="display_name" placeholder="Nombre y apellido" required>
@@ -58,6 +71,7 @@
 
     <div class="admin-list compact-admin-list">
       {% for user in users %}
+        {% set audit = user_prediction_audit.get(user.id) %}
         <details class="user-card">
           <summary>
             <span>
@@ -65,16 +79,27 @@
               <small>{{ user.display_name }}</small>
             </span>
             <span class="user-badges">
-              <b>{{ "Admin" if user.is_admin else "Usuario" }}</b>
+              <b>{{ "Rol: Admin" if user.is_admin else "Rol: Usuario" }}</b>
               {% if user.is_debugger %}<b>Debug</b>{% endif %}
               {% if user.is_banned %}<b class="danger-text">Ban</b>{% endif %}
-              {% if user.force_password_change %}<b>Clave pendiente</b>{% endif %}
+              <b class="{{ 'warning-text' if user.force_password_change else 'ok-text' }}">{{ "Clave: cambiar" if user.force_password_change else "Clave: ok" }}</b>
+              {% if audit %}
+                <b class="{{ 'ok-text' if audit.complete else 'warning-text' }}">Habilitadas: {{ audit.loaded }}/{{ audit.total }}</b>
+                <b>Total fixture: {{ audit.tournament_loaded }}/{{ audit.tournament_total }}</b>
+              {% endif %}
               <b class="{{ 'ok-text' if accepted_current_terms(user) else 'danger-text' }}">{{ "Aceptó vigente" if accepted_current_terms(user) else "Debe aceptar" }}</b>
             </span>
             <span class="edit-hint">Editar</span>
           </summary>
 
           <div class="user-card-body">
+            {% if audit and audit.stages %}
+              <div class="user-stage-progress" aria-label="Predicciones cargadas por etapa">
+                {% for item in audit.stages %}
+                  <span class="user-stage-chip {{ 'complete' if item.complete else ('future' if not item.available else 'partial') }}">{{ item.stage.label }} {{ item.loaded }}/{{ item.total }}{% if not item.available %} futura{% endif %}</span>
+                {% endfor %}
+              </div>
+            {% endif %}
             <form class="user-edit-form" method="post" action="{{ url_for('admin_update_user', user_id=user.id) }}">
               <input name="username" value="{{ user.username }}" aria-label="Usuario">
               <input name="display_name" value="{{ user.display_name }}" aria-label="Nombre y apellido">
@@ -185,11 +210,31 @@
       <label class="wide">URL partidos por fecha <input name="promiedos_games_url_template" value="{{ settings.promiedos_games_url_template }}"></label>
       <label>Fechas <input name="promiedos_group_rounds" value="{{ settings.promiedos_group_rounds }}"></label>
       <label>x-ver <input name="promiedos_x_ver" value="{{ settings.promiedos_x_ver }}"></label>
+      <label class="check"><input type="hidden" name="auto_fixture_sync_enabled" value="0"><input type="checkbox" name="auto_fixture_sync_enabled" value="1" {% if settings.auto_fixture_sync_enabled != "0" %}checked{% endif %}> Auto fixture</label>
+      <label>Sync fixture min <input name="auto_fixture_sync_interval_minutes" value="{{ settings.auto_fixture_sync_interval_minutes }}"></label>
+      <label class="check"><input type="hidden" name="auto_results_enabled" value="0"><input type="checkbox" name="auto_results_enabled" value="1" {% if settings.auto_results_enabled == "1" %}checked{% endif %}> Auto resultados</label>
+      <label class="check"><input type="hidden" name="auto_results_apply_provisional" value="0"><input type="checkbox" name="auto_results_apply_provisional" value="1" {% if settings.auto_results_apply_provisional != "0" %}checked{% endif %}> Cargar en vivo</label>
+      <label class="wide">Etapas auto <input name="auto_results_stage_keys" value="{{ settings.auto_results_stage_keys }}"></label>
+      <label class="wide">Fuentes auto <input name="auto_results_sources" value="{{ settings.auto_results_sources }}"></label>
+      <label>Intervalo seg <input name="auto_results_interval_seconds" value="{{ settings.auto_results_interval_seconds }}"></label>
+      <label>Anticipo min <input name="auto_results_start_before_minutes" value="{{ settings.auto_results_start_before_minutes }}"></label>
+      <label>Chequeo 45 <input name="auto_results_halftime_minutes" value="{{ settings.auto_results_halftime_minutes }}"></label>
+      <label>Reint 45 min <input name="auto_results_halftime_retry_minutes" value="{{ settings.auto_results_halftime_retry_minutes }}"></label>
+      <label>Chequeo 90 <input name="auto_results_fulltime_minutes" value="{{ settings.auto_results_fulltime_minutes }}"></label>
+      <label>Reint 90 min <input name="auto_results_fulltime_retry_minutes" value="{{ settings.auto_results_fulltime_retry_minutes }}"></label>
+      <label>Catch-up hs <input name="auto_results_catchup_hours" value="{{ settings.auto_results_catchup_hours }}"></label>
+      <label class="wide">URL ESPN <input name="espn_scoreboard_url" value="{{ settings.espn_scoreboard_url }}"></label>
+      <label class="wide">URL worldcup26 <input name="worldcup26_api_url" value="{{ settings.worldcup26_api_url }}"></label>
+      <label class="wide">URL upbound <input name="upbound_worldcup_url" value="{{ settings.upbound_worldcup_url }}"></label>
       <button>Guardar</button>
     </form>
     <form class="sync-row" method="post" action="{{ url_for('admin_sync_promiedos') }}">
-      <span>Importa partidos y resultados sin duplicar.</span>
+      <span>Importa partidos y resultados sin duplicar. Auto fixture: {{ settings.auto_fixture_sync_last_summary }} {% if settings.auto_fixture_sync_last_run_at %}Ultima: {{ format_datetime(settings.auto_fixture_sync_last_run_at) }}{% endif %}</span>
       <button>Sincronizar Promiedos</button>
+    </form>
+    <form class="sync-row" method="post" action="{{ url_for('admin_auto_results_run_once') }}">
+      <span>{{ settings.auto_results_last_summary }} {% if settings.auto_results_last_run_at %}Ultima: {{ format_datetime(settings.auto_results_last_run_at) }}{% endif %}</span>
+      <button>Probar auto resultados</button>
     </form>
   </details>
 
@@ -267,25 +312,122 @@
           <option value="{{ stage.stage_key }}">{{ stage.label }}</option>
         {% endfor %}
       </select>
-      <input name="starts_at" placeholder="2026-06-11 16:00">
-      <input name="home_team" placeholder="Local">
-      <input name="away_team" placeholder="Visitante">
+      <input name="starts_at" placeholder="2026-06-11 16:00" title="Hora Argentina (ARG)">
+      {% set team_options = team_select_options() %}
+      {% set bracket_options = bracket_team_options() %}
+      <select name="home_team">
+        <option value="">Local</option>
+        <optgroup label="Equipos">
+          {% for option in team_options %}
+            <option value="{{ option.value }}">{{ option.label }}</option>
+          {% endfor %}
+        </optgroup>
+        <optgroup label="Pendientes/bracket">
+          {% for option in bracket_options %}
+            <option value="{{ option }}">Pendiente: {{ option }}</option>
+          {% endfor %}
+        </optgroup>
+      </select>
+      <select name="away_team">
+        <option value="">Visitante</option>
+        <optgroup label="Equipos">
+          {% for option in team_options %}
+            <option value="{{ option.value }}">{{ option.label }}</option>
+          {% endfor %}
+        </optgroup>
+        <optgroup label="Pendientes/bracket">
+          {% for option in bracket_options %}
+            <option value="{{ option }}">Pendiente: {{ option }}</option>
+          {% endfor %}
+        </optgroup>
+      </select>
       <button>Agregar</button>
     </form>
-    <div class="results-list">
+    <form class="result-form result-filter" method="get" action="{{ url_for('admin') }}" data-result-filter>
+      <label>Fecha resultados
+        <select name="results_stage">
+          <option value="all" {% if selected_results_stage_key == "all" %}selected{% endif %}>Todas</option>
+          {% for stage in stages %}
+            <option value="{{ stage.stage_key }}" {% if selected_results_stage_key == stage.stage_key %}selected{% endif %}>
+              {% if current_results_stage_key == stage.stage_key %}Actual - {% endif %}{{ stage.label }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <span class="hint" data-result-count></span>
+    </form>
+    <div class="results-list" data-results-list>
       {% for game in games %}
-        <form class="result-row" method="post" action="{{ url_for('admin_update_game', game_id=game.id) }}">
+        {% set result_penalty_value = game.result_penalty_winner if game.result_penalty_winner else 'home' %}
+        {% set show_result_penalties = needs_penalty_winner(game.stage_key, game.home_score, game.away_score) %}
+        <form class="result-row" method="post" action="{{ url_for('admin_update_game', game_id=game.id) }}" data-result-stage="{{ game.stage_key }}" data-result-row data-is-knockout="{{ 1 if is_knockout_stage(game.stage_key) else 0 }}" data-home-team="{{ game.home_team }}" data-away-team="{{ game.away_team }}">
+          <input type="hidden" name="results_stage" value="{{ selected_results_stage_key }}">
           <span>{{ stage_label(game.stage_key) }}</span>
-          <strong>{{ game.home_team }} vs {{ game.away_team }}</strong>
-          <input name="home_score" type="number" placeholder="L" value="{{ game.home_score if game.home_score is not none else '' }}">
-          <input name="away_score" type="number" placeholder="V" value="{{ game.away_score if game.away_score is not none else '' }}">
-          <select name="result">
-            <option value="">Sin resultado</option>
-            <option value="home" {% if game.result == "home" %}selected{% endif %}>Gana local</option>
-            <option value="draw" {% if game.result == "draw" %}selected{% endif %}>Empate</option>
-            <option value="away" {% if game.result == "away" %}selected{% endif %}>Gana visitante</option>
-          </select>
+          <strong>{{ team_label(game.home_team) }} vs {{ team_label(game.away_team) }}{% if game.fixture_manual %} <span class="manual-fixture-pill">Manual</span>{% endif %}</strong>
+          <input name="home_score" type="number" placeholder="L" value="{{ game.home_score if game.home_score is not none else '' }}" data-result-home-score>
+          <input name="away_score" type="number" placeholder="V" value="{{ game.away_score if game.away_score is not none else '' }}" data-result-away-score>
+          {% if is_knockout_stage(game.stage_key) %}
+            <div class="result-penalty-panel" data-result-penalty-panel {% if not show_result_penalties %}hidden{% endif %}>
+              <span>Define por penales</span>
+              <label class="penalty-option {{ 'is-selected' if result_penalty_value == 'home' else '' }}">
+                <input type="radio" name="result_penalty_winner" value="home" {% if result_penalty_value == 'home' %}checked{% endif %}>
+                <span>{{ game.home_team }}</span>
+              </label>
+              <label class="penalty-option {{ 'is-selected' if result_penalty_value == 'away' else '' }}">
+                <input type="radio" name="result_penalty_winner" value="away" {% if result_penalty_value == 'away' %}checked{% endif %}>
+                <span>{{ game.away_team }}</span>
+              </label>
+            </div>
+          {% endif %}
           <button>Guardar</button>
+          <button class="secondary-button" formaction="{{ url_for('admin_clear_game_result', game_id=game.id) }}" formmethod="post" onclick="return confirm('Borrar este resultado?')">Borrar</button>
+          <details class="result-fixture-edit">
+            <summary>Editar fixture <small>horario/equipos</small></summary>
+            <label>Horario ARG <input name="starts_at" value="{{ game.starts_at }}" placeholder="2026-06-29 17:30"></label>
+            {% set team_options = team_select_options() %}
+            {% set team_values = team_select_values() %}
+            {% set bracket_options = bracket_team_options() %}
+            <label>Local
+              <select name="home_team">
+                {% if game.home_team not in team_values and game.home_team not in bracket_options %}
+                  <option value="{{ game.home_team }}" selected>Actual: {{ game.home_team }}</option>
+                {% endif %}
+                <optgroup label="Equipos">
+                  {% for option in team_options %}
+                    <option value="{{ option.value }}" {% if game.home_team == option.value %}selected{% endif %}>{{ option.label }}</option>
+                  {% endfor %}
+                </optgroup>
+                <optgroup label="Pendientes/bracket">
+                  {% for option in bracket_options %}
+                    <option value="{{ option }}" {% if game.home_team == option %}selected{% endif %}>Pendiente: {{ option }}</option>
+                  {% endfor %}
+                </optgroup>
+              </select>
+            </label>
+            <label>Visitante
+              <select name="away_team">
+                {% if game.away_team not in team_values and game.away_team not in bracket_options %}
+                  <option value="{{ game.away_team }}" selected>Actual: {{ game.away_team }}</option>
+                {% endif %}
+                <optgroup label="Equipos">
+                  {% for option in team_options %}
+                    <option value="{{ option.value }}" {% if game.away_team == option.value %}selected{% endif %}>{{ option.label }}</option>
+                  {% endfor %}
+                </optgroup>
+                <optgroup label="Pendientes/bracket">
+                  {% for option in bracket_options %}
+                    <option value="{{ option }}" {% if game.away_team == option %}selected{% endif %}>Pendiente: {{ option }}</option>
+                  {% endfor %}
+                </optgroup>
+              </select>
+            </label>
+            <label class="check result-fixture-lock">
+              <input type="hidden" name="fixture_manual" value="0">
+              <input type="checkbox" name="fixture_manual" value="1" {% if game.fixture_manual %}checked{% endif %}>
+              Proteger de API
+            </label>
+            <span class="hint">Si cambiás horario o equipos, este partido queda protegido para que el fixture automático no lo pise.</span>
+          </details>
         </form>
       {% endfor %}
     </div>

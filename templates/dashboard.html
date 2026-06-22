@@ -21,10 +21,14 @@
       {% set pending = namespace(count=0) %}
       {% for game in games %}
         {% set prediction = predictions.get(game.id) %}
+        {% set home_value = prediction.home_goals if prediction and prediction.home_goals is not none else 0 %}
+        {% set away_value = prediction.away_goals if prediction and prediction.away_goals is not none else 0 %}
+        {% set penalty_value = prediction.penalty_winner if prediction and prediction.penalty_winner else 'home' %}
+        {% set show_penalty_panel = needs_penalty_winner(game.stage_key, home_value, away_value) %}
         {% if not prediction %}{% set pending.count = pending.count + 1 %}{% endif %}
         <article class="match-row">
           <div class="match-info">
-            <span class="date">{{ game.starts_at }}</span>
+            <span class="date">{{ format_game_datetime(game.starts_at) }}</span>
             <strong class="match-title">
               <span class="side-flag">{{ team_flag(game.home_team) }}</span>
               <span>{{ game.home_team }} vs {{ game.away_team }}</span>
@@ -32,17 +36,37 @@
             </strong>
             <small class="prediction-summary" data-prediction-summary>{{ prediction_label(game, prediction) if prediction else "" }}</small>
           </div>
-          <form method="post" action="{{ url_for('predict', game_id=game.id) }}" class="score-pick prediction-form {{ 'is-saved' if prediction else 'is-new' }}" data-prediction-form data-game-id="{{ game.id }}" data-home-team="{{ game.home_team }}" data-away-team="{{ game.away_team }}">
+          <form method="post" action="{{ url_for('predict', game_id=game.id) }}" class="score-pick prediction-form {{ 'is-saved' if prediction else 'is-new' }}" data-prediction-form data-game-id="{{ game.id }}" data-home-team="{{ game.home_team }}" data-away-team="{{ game.away_team }}" data-is-knockout="{{ 1 if is_knockout_stage(game.stage_key) else 0 }}">
             {% if not prediction %}
               <input type="hidden" form="batch-predictions" name="game_id" value="{{ game.id }}">
             {% endif %}
-            <input aria-label="Goles {{ game.home_team }}" name="{{ 'home_goals' if prediction else 'home_goals_' ~ game.id }}" type="number" min="0" max="30" inputmode="numeric" value="{{ prediction.home_goals if prediction and prediction.home_goals is not none else 0 }}" {% if not prediction %}form="batch-predictions"{% endif %}>
+            <input aria-label="Goles {{ game.home_team }}" name="{{ 'home_goals' if prediction else 'home_goals_' ~ game.id }}" type="number" min="0" max="30" inputmode="numeric" value="{{ home_value }}" {% if not prediction %}form="batch-predictions"{% endif %}>
             <span class="score-separator">-</span>
-            <input aria-label="Goles {{ game.away_team }}" name="{{ 'away_goals' if prediction else 'away_goals_' ~ game.id }}" type="number" min="0" max="30" inputmode="numeric" value="{{ prediction.away_goals if prediction and prediction.away_goals is not none else 0 }}" {% if not prediction %}form="batch-predictions"{% endif %}>
+            <input aria-label="Goles {{ game.away_team }}" name="{{ 'away_goals' if prediction else 'away_goals_' ~ game.id }}" type="number" min="0" max="30" inputmode="numeric" value="{{ away_value }}" {% if not prediction %}form="batch-predictions"{% endif %}>
             {% if prediction %}
               <button type="submit">Actualizar</button>
             {% else %}
               <span class="row-save-state">Pendiente</span>
+            {% endif %}
+            {% if is_knockout_stage(game.stage_key) %}
+              <div class="penalty-panel" data-penalty-panel {% if not show_penalty_panel %}hidden{% endif %}>
+                <div class="penalty-panel-head">
+                  <span>Define por penales</span>
+                  <span class="fixture-status-pill live">Empate</span>
+                </div>
+                <div class="penalty-choice" role="group" aria-label="Ganador por penales">
+                  <label class="penalty-option {{ 'is-selected' if penalty_value == 'home' else '' }}">
+                    <input type="radio" name="{{ 'penalty_winner' if prediction else 'penalty_winner_' ~ game.id }}" value="home" {% if penalty_value == 'home' %}checked{% endif %} {% if not prediction %}form="batch-predictions"{% endif %}>
+                    <span>{{ game.home_team }}</span>
+                    <small>Pasa por penales</small>
+                  </label>
+                  <label class="penalty-option {{ 'is-selected' if penalty_value == 'away' else '' }}">
+                    <input type="radio" name="{{ 'penalty_winner' if prediction else 'penalty_winner_' ~ game.id }}" value="away" {% if penalty_value == 'away' %}checked{% endif %} {% if not prediction %}form="batch-predictions"{% endif %}>
+                    <span>{{ game.away_team }}</span>
+                    <small>Pasa por penales</small>
+                  </label>
+                </div>
+              </div>
             {% endif %}
           </form>
         </article>
@@ -89,9 +113,9 @@
           <span title="Acertados/Exactos">Marcador</span>
           <span title="Marcador exacto: 3 pts. Resultado correcto: 1 pt.">Puntos</span>
         </div>
-        {% for row in leaderboard[:12] %}
+        {% for row in leaderboard[:10] %}
           <div class="score-table-row {{ 'current-user' if row.user.id == g.user.id else '' }}">
-            <span class="has-tip" tabindex="0" title="{{ row.user.username }}" data-tip="{{ row.user.username }}">{{ loop.index }}. {{ rank_badge(loop.index) }} {{ row.user.username }}</span>
+            <span class="has-tip" tabindex="0" data-tip="{{ row.user.username }}">{{ loop.index }}. {{ rank_badge(loop.index) }} {{ row.user.username }}</span>
             <strong>{{ row.hits }}/{{ row.exact }}</strong>
             <strong>{{ row.total }}</strong>
           </div>
@@ -102,7 +126,7 @@
     </section>
     <section class="card">
       <div class="card-head">
-        <h2>Top {{ active_stage.label }}</h2>
+        <h2>Top {{ playing_stage.label }}</h2>
       </div>
       <div class="score-table">
         <div class="score-table-head">
@@ -110,9 +134,9 @@
           <span title="Acertados/Exactos">Marcador</span>
           <span title="Marcador exacto: 3 pts. Resultado correcto: 1 pt.">Puntos</span>
         </div>
-        {% for row in active_stage_board[:12] %}
+        {% for row in playing_stage_board[:10] %}
           <div class="score-table-row {{ 'current-user' if row.user.id == g.user.id else '' }}">
-            <span class="has-tip" tabindex="0" title="{{ row.user.username }}" data-tip="{{ row.user.username }}">{{ loop.index }}. {{ rank_badge(loop.index) }} {{ row.user.username }}</span>
+            <span class="has-tip" tabindex="0" data-tip="{{ row.user.username }}">{{ loop.index }}. {{ rank_badge(loop.index) }} {{ row.user.username }}</span>
             <strong>{{ row.hits }}/{{ row.exact }}</strong>
             <strong>{{ row.total }}</strong>
           </div>

@@ -21,7 +21,7 @@
       </div>
       {% for row in rows %}
         <div class="score-table-row {{ 'current-user' if row.user.id == g.user.id else '' }}">
-          <span class="has-tip" tabindex="0" title="{{ row.user.username }}" data-tip="{{ row.user.username }}">{{ loop.index }}. {{ rank_badge(loop.index) }} {{ row.user.username }}</span>
+          <span class="has-tip" tabindex="0" data-tip="{{ row.user.username }}">{{ loop.index }}. {{ rank_badge(loop.index) }} {{ row.user.username }}</span>
           <strong>{{ row.hits }}/{{ row.exact }}</strong>
           <strong>{{ row.total }}</strong>
         </div>
@@ -34,11 +34,11 @@
   <aside class="side-stack">
     <section class="card">
       <div class="card-head">
-        <h2>Distribución</h2>
+        <h2>Distribucion</h2>
       </div>
       <div class="data-list">
         {% for prize in prize_rows %}
-          <div><span>{{ prize.name }} · {{ prize.percent }}%</span><strong>{{ prize.amount|money }}</strong></div>
+          <div><span>{{ prize.name }} - {{ prize.percent }}%</span><strong>{{ prize.amount|money }}</strong></div>
         {% endfor %}
       </div>
     </section>
@@ -48,39 +48,65 @@
 <section class="card section">
   <div class="card-head">
     <h2>Por etapa</h2>
+    <span class="hint">Top 10 visible; expandi para ver el resto</span>
   </div>
   <div class="stage-grid">
     {% for key, board in stage_rows.items() %}
       {% set has_activity = board|selectattr('points')|list|length > 0 %}
+      {% set winner_info = stage_winners[key] %}
+      {% set winners = winner_info.users %}
       <article class="stage-card">
-        <h3>{{ stage_label(key) }}</h3>
-        {% set winners = stage_winners[key].users %}
-        {% if winners %}
-          <p class="stage-winners" title="{{ winners|join(', ') }}">{{ winners|length }}x👑</p>
-        {% endif %}
+        <h3>{{ stage_label(key) }}{% if winners %}<span class="stage-title-prize" title="{{ winners|join(', ') }} - {{ winner_info.points }} pts"> - {{ winner_info.count }}x&#x1F451;</span>{% elif not has_activity %}<span class="stage-title-note"> - Posicion general actual</span>{% endif %}</h3>
         {% if has_activity %}
           <div class="stage-score-head">
             <span>Usuario</span><span title="Acertados/Exactos">Marcador</span><span title="Marcador exacto: 3 pts. Resultado correcto: 1 pt.">Pts</span>
           </div>
-          {% for item in board[:6] %}
+          {% for item in board[:10] %}
             <div class="stage-score-row {{ 'current-user' if item.user.id == g.user.id else '' }}">
-              <span class="stage-user has-tip" tabindex="0" title="{{ item.user.username }}" data-tip="{{ item.user.username }}">{{ rank_badge(loop.index) }} {{ item.user.username }}</span>
+              <span class="stage-user has-tip" tabindex="0" data-tip="{{ item.user.username }}">{{ loop.index }}. {{ rank_badge(loop.index) }} {{ item.user.username }}</span>
               <strong>{{ item.hits }}/{{ item.exact }}</strong>
               <strong>{{ item.points }}</strong>
-            </div>
-          {% endfor %}
-        {% else %}
-          <div class="stage-position-head">
-            <span>Posicion general actual</span>
-          </div>
-          {% for row in rows[:6] %}
-            <div class="stage-position-row {{ 'current-user' if row.user.id == g.user.id else '' }}">
-              <span class="rank-mini">{{ loop.index }}</span>
-              <strong class="has-tip" tabindex="0" title="{{ row.user.username }}" data-tip="{{ row.user.username }}">{{ rank_badge(loop.index) }} {{ row.user.username }}</strong>
             </div>
           {% else %}
             <p class="empty">Sin participantes.</p>
           {% endfor %}
+          {% if board|length > 10 %}
+            <details class="stage-more">
+              <summary>Ver resto ({{ board|length - 10 }})</summary>
+              <div class="stage-more-rows">
+                {% for item in board[10:] %}
+                  <div class="stage-score-row {{ 'current-user' if item.user.id == g.user.id else '' }}">
+                    <span class="stage-user has-tip" tabindex="0" data-tip="{{ item.user.username }}">{{ loop.index + 10 }}. {{ rank_badge(loop.index + 10) }} {{ item.user.username }}</span>
+                    <strong>{{ item.hits }}/{{ item.exact }}</strong>
+                    <strong>{{ item.points }}</strong>
+                  </div>
+                {% endfor %}
+              </div>
+            </details>
+          {% endif %}
+        {% else %}
+          <div class="stage-standing-head">
+            <span>Usuario</span>
+          </div>
+          {% for row in rows[:10] %}
+            <div class="stage-standing-row {{ 'current-user' if row.user.id == g.user.id else '' }}">
+              <span class="stage-user has-tip" tabindex="0" data-tip="{{ row.user.username }}">{{ loop.index }}. {{ rank_badge(loop.index) }} {{ row.user.username }}</span>
+            </div>
+          {% else %}
+            <p class="empty">Sin participantes.</p>
+          {% endfor %}
+          {% if rows|length > 10 %}
+            <details class="stage-more">
+              <summary>Ver resto ({{ rows|length - 10 }})</summary>
+              <div class="stage-more-rows">
+                {% for row in rows[10:] %}
+                  <div class="stage-standing-row {{ 'current-user' if row.user.id == g.user.id else '' }}">
+                    <span class="stage-user has-tip" tabindex="0" data-tip="{{ row.user.username }}">{{ loop.index + 10 }}. {{ rank_badge(loop.index + 10) }} {{ row.user.username }}</span>
+                  </div>
+                {% endfor %}
+              </div>
+            </details>
+          {% endif %}
         {% endif %}
       </article>
     {% endfor %}

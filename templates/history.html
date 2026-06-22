@@ -1,0 +1,479 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-title compact-title">
+  <div>
+    <p class="eyebrow">Ranking</p>
+    <h1>Historico</h1>
+  </div>
+</section>
+
+{% macro render_history_table(rows, mode_key, hidden=False) %}
+  <div class="history-table history-mode-panel" data-history-table-panel="{{ mode_key }}" {% if hidden %}hidden{% endif %}>
+    <div class="history-table-head">
+      <span>Usuario</span>
+      <span title="Acertados/Exactos">Marcador</span>
+      <span title="Marcador exacto: 3 pts. Resultado correcto: 1 pt.">Pts</span>
+    </div>
+    {% for row in rows %}
+      <div class="history-table-row {{ 'current-user' if row.user.id == g.user.id else '' }}">
+        <span>{{ loop.index }}. {{ rank_badge(loop.index) }} {{ row.user.username }}</span>
+        <strong>{{ row.hits }}/{{ row.exact }}</strong>
+        <strong>{{ row.total }}</strong>
+      </div>
+    {% endfor %}
+  </div>
+{% endmacro %}
+
+<div data-history-mode-root>
+<section class="card section history-card">
+  <div class="card-head">
+    <div>
+      <h2>Progreso por partido</h2>
+      {% if latest_history_event %}
+        <span class="hint">Ultimo: {{ latest_history_event.label }}</span>
+      {% endif %}
+    </div>
+    <div class="history-chart-controls" role="radiogroup" aria-label="Modo del historico">
+      <label>
+        <input type="radio" name="history_mode" value="accumulated" checked data-history-mode>
+        <span>Acumulado</span>
+      </label>
+      <label>
+        <input type="radio" name="history_mode" value="stage" data-history-mode>
+        <span>Por etapa</span>
+      </label>
+    </div>
+  </div>
+  <div class="history-stage-list">
+    {% for group in history_groups %}
+      {% set is_latest_stage = loop.last %}
+      <details class="history-stage" {% if loop.last %}open{% endif %}>
+        <summary>
+          <span>{{ group.label }}</span>
+          <strong>{{ group.events|length }} partidos</strong>
+        </summary>
+        <div class="history-event-list">
+          {% for event in group.events %}
+            <details class="history-event" data-game-id="{{ event.game.id }}" {% if is_latest_stage and loop.last %}open{% endif %}>
+              <summary>
+                <span>{{ event.label }}</span>
+                <small>{{ format_game_datetime(event.game.starts_at) }}</small>
+              </summary>
+              {{ render_history_table(event.board, "accumulated") }}
+              {{ render_history_table(event.stage_board, "stage", True) }}
+            </details>
+          {% endfor %}
+        </div>
+      </details>
+    {% else %}
+      <p class="empty padded-empty">Todavia no hay partidos con resultado.</p>
+    {% endfor %}
+  </div>
+</section>
+
+{% macro render_history_chart(chart, mode_key, hidden=False) %}
+  <div class="history-chart-panel" data-history-chart data-history-chart-panel="{{ mode_key }}" {% if hidden %}hidden{% endif %}>
+    <div class="history-chart-wrap">
+      <svg class="history-chart" width="{{ chart.width }}" height="{{ chart.height }}" viewBox="0 0 {{ chart.width }} {{ chart.height }}" role="img" aria-label="Grafico historico de puntos">
+        {% for line in chart.grid %}
+          <line class="history-grid-line" x1="52" x2="{{ chart.width - 28 }}" y1="{{ line.y }}" y2="{{ line.y }}"></line>
+          <text class="history-grid-label" x="8" y="{{ line.y }}">{{ line.value }}</text>
+        {% endfor %}
+        {% for stage in chart.stage_ranges %}
+          <rect class="history-stage-band{% if loop.index is even %} is-alt{% endif %}" x="{{ stage.x1 }}" y="{{ chart.stage_band_y }}" width="{{ stage.width }}" height="{{ chart.stage_band_height }}"></rect>
+          <line class="history-stage-boundary" x1="{{ stage.x1 }}" x2="{{ stage.x1 }}" y1="{{ chart.plot_top }}" y2="{{ chart.stage_band_y + chart.stage_band_height }}"></line>
+          {% if loop.last %}
+            <line class="history-stage-boundary" x1="{{ stage.x2 }}" x2="{{ stage.x2 }}" y1="{{ chart.plot_top }}" y2="{{ chart.stage_band_y + chart.stage_band_height }}"></line>
+          {% endif %}
+          <text class="history-stage-label" x="{{ stage.x }}" y="{{ chart.stage_label_y }}">{{ stage.label }}</text>
+        {% endfor %}
+        {% for tick in chart.ticks %}
+          <line class="history-tick" x1="{{ tick.x }}" x2="{{ tick.x }}" y1="{{ chart.tick_y1 }}" y2="{{ chart.tick_y2 }}"></line>
+          <text class="history-tick-label" x="{{ tick.x }}" y="{{ chart.tick_label_y }}">{{ tick.label }}</text>
+        {% endfor %}
+        {% for series in chart.series %}
+          <g class="history-series" data-history-series="{{ series.user.id }}" tabindex="0">
+            <polyline class="history-hit-line" points="{{ series.points }}" fill="none"></polyline>
+            <polyline class="history-value-line" points="{{ series.points }}" fill="none" stroke="{{ series.color }}"></polyline>
+            {% for dot in series.dots %}
+              <circle class="history-point" cx="{{ dot.x }}" cy="{{ dot.y }}" r="3.4" fill="{{ series.color }}"></circle>
+              <circle
+                class="history-point-hit"
+                cx="{{ dot.x }}"
+                cy="{{ dot.y }}"
+                r="12"
+                data-history-point
+                data-history-series-id="{{ series.user.id }}"
+                data-history-user="{{ series.user.username }}"
+                data-history-match="{{ dot.label }}"
+                data-history-points="{{ dot.value }}"
+                data-history-point-label="{{ chart.point_label }}"
+                data-history-delta="{{ dot.delta }}"
+                data-history-color="{{ series.color }}"
+                tabindex="0"
+                aria-label="{{ series.user.username }}: {{ dot.value }} {{ chart.point_label }}, {{ dot.delta }} en {{ dot.label }}"
+              ></circle>
+            {% endfor %}
+          </g>
+        {% endfor %}
+      </svg>
+    </div>
+    <div class="history-tooltip" data-history-tooltip role="status" aria-live="polite" hidden></div>
+    <div class="history-player-list">
+      {% for series in chart.series %}
+        <label class="history-player" data-history-player="{{ series.user.id }}" style="--player-color: {{ series.color }}">
+          <input type="checkbox" checked data-history-toggle="{{ series.user.id }}">
+          <span>{{ series.user.username }}</span>
+          <strong>{{ series.total }}</strong>
+        </label>
+      {% endfor %}
+    </div>
+  </div>
+{% endmacro %}
+
+<section class="card section history-card" data-history-chart-root>
+  <div class="card-head">
+    <h2>Grafico general</h2>
+  </div>
+  {% if history_chart.series %}
+    <p class="history-chart-hint" data-history-mode-hint="accumulated">Puntos acumulados hasta el ultimo resultado cargado</p>
+    <p class="history-chart-hint" data-history-mode-hint="stage" hidden>Puntos acumulados dentro de cada etapa</p>
+    {{ render_history_chart(history_chart, "accumulated") }}
+    {{ render_history_chart(history_stage_chart, "stage", True) }}
+  {% else %}
+    <p class="empty padded-empty">Todavia no hay datos para graficar.</p>
+  {% endif %}
+</section>
+</div>
+
+<script>
+  document.querySelectorAll("[data-history-chart]").forEach((chart) => {
+    const chartSvg = chart.querySelector(".history-chart");
+    const playerList = chart.querySelector(".history-player-list");
+    const chartWrap = chart.querySelector(".history-chart-wrap");
+    const tooltip = chart.querySelector("[data-history-tooltip]");
+    let pinnedUserId = "";
+    let pinnedPoint = null;
+    let hoverPoint = null;
+    let lastPointerWasTouch = false;
+
+    const scrollToLatest = () => {
+      if (chartWrap) {
+        chartWrap.scrollLeft = chartWrap.scrollWidth;
+      }
+    };
+    const clearTooltipActive = () => {
+      chart.querySelectorAll(".is-tooltip-active").forEach((item) => item.classList.remove("is-tooltip-active"));
+    };
+    const positionTooltip = (point) => {
+      if (!tooltip || !point || tooltip.hidden) {
+        return;
+      }
+      const rect = point.getBoundingClientRect();
+      const width = tooltip.offsetWidth || 260;
+      const x = Math.min(Math.max(rect.left + rect.width / 2, 12 + width / 2), window.innerWidth - 12 - width / 2);
+      const placeBelow = rect.top < 92;
+      tooltip.style.left = `${x}px`;
+      tooltip.style.top = `${placeBelow ? rect.bottom + 12 : rect.top - 12}px`;
+      tooltip.classList.toggle("is-below", placeBelow);
+    };
+    const showTooltip = (point, pinned = false) => {
+      if (!tooltip || !point) {
+        return;
+      }
+      const delta = Number(point.dataset.historyDelta || 0);
+      const deltaText = delta > 0 ? `+${delta}` : `${delta}`;
+      const user = document.createElement("span");
+      const match = document.createElement("strong");
+      const meta = document.createElement("small");
+
+      user.textContent = point.dataset.historyUser || "";
+      match.textContent = point.dataset.historyMatch || "";
+      meta.textContent = `${point.dataset.historyPoints || 0} ${point.dataset.historyPointLabel || "pts acumulados"} | ${deltaText} en este partido`;
+
+      tooltip.replaceChildren(user, match, meta);
+      tooltip.style.setProperty("--tooltip-color", point.dataset.historyColor || "#86dec2");
+      tooltip.dataset.historyUserId = point.dataset.historySeriesId || "";
+      tooltip.hidden = false;
+      clearTooltipActive();
+      point.classList.add("is-tooltip-active");
+      point.previousElementSibling?.classList.add("is-tooltip-active");
+      requestAnimationFrame(() => positionTooltip(point));
+      if (pinned) {
+        pinnedPoint = point;
+      }
+    };
+    const hideTooltip = () => {
+      pinnedPoint = null;
+      hoverPoint = null;
+      clearTooltipActive();
+      if (tooltip) {
+        tooltip.hidden = true;
+        delete tooltip.dataset.historyUserId;
+      }
+    };
+    const releaseTooltip = (point) => {
+      if (pinnedPoint) {
+        positionTooltip(pinnedPoint);
+      } else if (point) {
+        hideTooltip();
+      }
+    };
+    const visibleHistoryPoints = () => Array.from(chart.querySelectorAll("[data-history-point]")).filter((point) => {
+      return !point.closest(".history-series")?.classList.contains("is-hidden");
+    });
+    const nearestHistoryPoint = (event, maxDistance = 18) => {
+      const highlightedUserId = pinnedUserId || chart.querySelector(".history-series.is-highlighted")?.dataset.historySeries || "";
+      const points = visibleHistoryPoints();
+      const prioritizedPoints = highlightedUserId
+        ? [
+            ...points.filter((point) => point.dataset.historySeriesId === highlightedUserId),
+            ...points.filter((point) => point.dataset.historySeriesId !== highlightedUserId).reverse(),
+          ]
+        : points.reverse();
+      let nearestPoint = null;
+      let nearestDistance = Number.POSITIVE_INFINITY;
+      prioritizedPoints.forEach((point) => {
+        const rect = point.getBoundingClientRect();
+        const dx = event.clientX - (rect.left + rect.width / 2);
+        const dy = event.clientY - (rect.top + rect.height / 2);
+        const distance = Math.hypot(dx, dy);
+        if (distance <= maxDistance && distance < nearestDistance) {
+          nearestPoint = point;
+          nearestDistance = distance;
+        }
+      });
+      return nearestPoint;
+    };
+    const showHoverPoint = (point) => {
+      if (!point) {
+        if (!pinnedPoint) {
+          hideTooltip();
+          if (!pinnedUserId) {
+            clearHighlights();
+          }
+        }
+        return;
+      }
+      const userId = point.dataset.historySeriesId;
+      hoverPoint = point;
+      setHighlight(userId);
+      showTooltip(point);
+    };
+    const clearHoverPoint = () => {
+      if (pinnedPoint) {
+        positionTooltip(pinnedPoint);
+        return;
+      }
+      hoverPoint = null;
+      hideTooltip();
+      if (!pinnedUserId) {
+        clearHighlights();
+      }
+    };
+    const pointFromEventTarget = (target) => {
+      return target instanceof Element ? target.closest("[data-history-point]") : null;
+    };
+    const pointFromPointerEvent = (event, maxDistance = 22) => {
+      return pointFromEventTarget(event.target) || nearestHistoryPoint(event, maxDistance);
+    };
+    const setFocusMode = (enabled) => {
+      chartSvg?.classList.toggle("has-history-focus", enabled);
+      playerList?.classList.toggle("has-history-focus", enabled);
+    };
+    const clearHighlights = () => {
+      chart.querySelectorAll(".is-highlighted").forEach((item) => item.classList.remove("is-highlighted"));
+      setFocusMode(false);
+    };
+    const setHighlight = (userId, pinned = false) => {
+      if (!userId) {
+        pinnedUserId = "";
+        clearHighlights();
+        return;
+      }
+      if (pinned) {
+        pinnedUserId = userId;
+      }
+      clearHighlights();
+      chart.querySelectorAll(`[data-history-series="${userId}"]`).forEach((series) => {
+        series.classList.add("is-highlighted");
+        series.parentNode?.appendChild(series);
+      });
+      chart.querySelectorAll(`[data-history-player="${userId}"]`).forEach((player) => {
+        player.classList.add("is-highlighted");
+      });
+      setFocusMode(true);
+    };
+    const releaseHighlight = (userId) => {
+      if (pinnedUserId) {
+        if (pinnedUserId !== userId) {
+          setHighlight(pinnedUserId);
+        }
+      } else {
+        clearHighlights();
+      }
+    };
+    const setHidden = (userId, hidden) => {
+      chart.querySelectorAll(`[data-history-series="${userId}"]`).forEach((series) => {
+        series.classList.toggle("is-hidden", hidden);
+      });
+      chart.querySelectorAll(`[data-history-player="${userId}"]`).forEach((player) => {
+        player.classList.toggle("is-muted", hidden);
+      });
+      if (hidden && tooltip?.dataset.historyUserId === userId) {
+        hideTooltip();
+      }
+    };
+    chart.querySelectorAll("[data-history-toggle]").forEach((input) => {
+      input.addEventListener("change", () => setHidden(input.dataset.historyToggle, !input.checked));
+      input.addEventListener("pointerdown", (event) => event.stopPropagation());
+      input.addEventListener("click", (event) => event.stopPropagation());
+    });
+    chart.querySelectorAll("[data-history-player]").forEach((player) => {
+      const userId = player.dataset.historyPlayer;
+      player.addEventListener("mouseenter", () => setHighlight(userId));
+      player.addEventListener("mouseleave", () => releaseHighlight(userId));
+      player.addEventListener("focusin", () => setHighlight(userId));
+      player.addEventListener("focusout", () => releaseHighlight(userId));
+      player.addEventListener("click", (event) => {
+        if (event.target.closest("input")) {
+          return;
+        }
+        event.preventDefault();
+        setHighlight(userId, true);
+      });
+      player.addEventListener("touchstart", () => setHighlight(userId, true), { passive: true });
+    });
+    chart.querySelectorAll("[data-history-series]").forEach((series) => {
+      const userId = series.dataset.historySeries;
+      series.addEventListener("mouseenter", () => setHighlight(userId));
+      series.addEventListener("mouseleave", () => releaseHighlight(userId));
+      series.addEventListener("focusin", () => setHighlight(userId));
+      series.addEventListener("focusout", () => releaseHighlight(userId));
+      series.addEventListener("click", () => setHighlight(userId, true));
+      series.addEventListener("touchstart", () => setHighlight(userId, true), { passive: true });
+    });
+    chart.querySelectorAll("[data-history-point]").forEach((point) => {
+      const userId = point.dataset.historySeriesId;
+      point.addEventListener("focusin", () => {
+        setHighlight(userId);
+        showTooltip(point);
+      });
+      point.addEventListener("focusout", () => {
+        releaseHighlight(userId);
+        releaseTooltip(point);
+      });
+    });
+    chartSvg?.addEventListener("pointerdown", (event) => {
+      lastPointerWasTouch = event.pointerType === "touch" || event.pointerType === "pen";
+    });
+    chartSvg?.addEventListener("mousemove", (event) => {
+      if (pinnedPoint || lastPointerWasTouch) {
+        return;
+      }
+      const point = nearestHistoryPoint(event, 18);
+      if (point !== hoverPoint) {
+        showHoverPoint(point);
+      } else if (point) {
+        positionTooltip(point);
+      }
+    });
+    chartSvg?.addEventListener("mouseleave", () => {
+      if (!pinnedPoint) {
+        clearHoverPoint();
+      }
+    });
+    chartSvg?.addEventListener("click", (event) => {
+      const point = pointFromPointerEvent(event, 24);
+      if (!point) {
+        if (!lastPointerWasTouch) {
+          clearHoverPoint();
+        }
+        return;
+      }
+      event.stopPropagation();
+      const userId = point.dataset.historySeriesId;
+      setHighlight(userId, lastPointerWasTouch);
+      showTooltip(point, lastPointerWasTouch);
+    }, true);
+    chartSvg?.addEventListener("touchstart", (event) => {
+      const touch = event.changedTouches?.[0];
+      if (!touch) {
+        return;
+      }
+      const point = nearestHistoryPoint(touch, 26);
+      if (!point) {
+        return;
+      }
+      const userId = point.dataset.historySeriesId;
+      setHighlight(userId, true);
+      showTooltip(point, true);
+    }, { passive: true });
+    document.addEventListener("click", (event) => {
+      if (!chart.contains(event.target)) {
+        pinnedUserId = "";
+        clearHighlights();
+        hideTooltip();
+      }
+    });
+    chartWrap?.addEventListener("scroll", () => {
+      if (pinnedPoint) {
+        positionTooltip(pinnedPoint);
+      }
+    });
+    chart.addEventListener("history-mode-hide", () => {
+      pinnedUserId = "";
+      clearHighlights();
+      hideTooltip();
+    });
+    window.addEventListener("resize", () => {
+      if (pinnedPoint) {
+        positionTooltip(pinnedPoint);
+      }
+    });
+    window.addEventListener("scroll", () => {
+      if (pinnedPoint) {
+        positionTooltip(pinnedPoint);
+      }
+    }, true);
+    requestAnimationFrame(scrollToLatest);
+    window.addEventListener("load", scrollToLatest, { once: true });
+  });
+
+  document.querySelectorAll("[data-history-mode-root]").forEach((root) => {
+    const scrollPanelToLatest = (panel) => {
+      const wrap = panel?.querySelector(".history-chart-wrap");
+      if (wrap) {
+        requestAnimationFrame(() => {
+          wrap.scrollLeft = wrap.scrollWidth;
+        });
+      }
+    };
+    const setMode = (mode) => {
+      root.querySelectorAll("[data-history-table-panel]").forEach((panel) => {
+        panel.hidden = panel.dataset.historyTablePanel !== mode;
+      });
+      root.querySelectorAll("[data-history-chart-panel]").forEach((panel) => {
+        const active = panel.dataset.historyChartPanel === mode;
+        panel.hidden = !active;
+        if (active) {
+          scrollPanelToLatest(panel);
+        } else {
+          panel.dispatchEvent(new CustomEvent("history-mode-hide"));
+        }
+      });
+      root.querySelectorAll("[data-history-mode-hint]").forEach((hint) => {
+        hint.hidden = hint.dataset.historyModeHint !== mode;
+      });
+    };
+    root.querySelectorAll("[data-history-mode]").forEach((input) => {
+      input.addEventListener("change", () => {
+        if (input.checked) {
+          setMode(input.value);
+        }
+      });
+    });
+    setMode(root.querySelector("[data-history-mode]:checked")?.value || "accumulated");
+  });
+</script>
+{% endblock %}

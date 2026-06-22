@@ -1,0 +1,309 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-title compact-title">
+  <div>
+    <p class="eyebrow">Administracion</p>
+    <h1>Imagen ranking</h1>
+  </div>
+</section>
+
+<section class="ranking-image-tool" data-ranking-image-tool>
+  <aside class="card ranking-image-controls">
+    <div class="card-head">
+      <h2>Tabla para redes</h2>
+      <span class="hint" data-ranking-count>0 filas</span>
+    </div>
+    <div class="ranking-control-body">
+      <label>Tabla
+        <select data-ranking-board>
+          {% for board in ranking_payload.boards %}
+            <option value="{{ board.key }}">{{ board.title }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Encabezado
+        <input data-ranking-title value="{{ default_title }}">
+      </label>
+      <div class="ranking-control-grid">
+        <label>Ancho PNG
+          <input data-ranking-width type="number" min="520" max="2160" step="1" value="724">
+        </label>
+        <label>Filas
+          <select data-ranking-limit>
+            <option value="10">Top 10</option>
+            <option value="20">Top 20</option>
+            <option value="all" selected>Todos</option>
+          </select>
+        </label>
+      </div>
+      <div class="ranking-control-grid">
+        <label>Medallas
+          <select data-ranking-medals>
+            <option value="auto" selected>Top 3</option>
+            <option value="none">Sin medallas</option>
+          </select>
+        </label>
+        <label>Formato
+          <select data-ranking-file-type>
+            <option value="png" selected>PNG</option>
+          </select>
+        </label>
+      </div>
+      <div class="ranking-actions">
+        <button type="button" data-ranking-download>Descargar PNG</button>
+        <button class="secondary-button" type="button" data-ranking-copy>Copiar PNG</button>
+      </div>
+      <p class="status" data-ranking-status></p>
+    </div>
+  </aside>
+
+  <section class="card ranking-preview-wrap" aria-label="Vista previa ranking">
+    <canvas data-ranking-canvas></canvas>
+  </section>
+</section>
+
+<script type="application/json" id="rankingImageData">{{ ranking_payload|tojson }}</script>
+<script>
+  (() => {
+    const root = document.querySelector("[data-ranking-image-tool]");
+    if (!root) return;
+    const data = JSON.parse(document.getElementById("rankingImageData").textContent);
+    const els = {
+      board: root.querySelector("[data-ranking-board]"),
+      title: root.querySelector("[data-ranking-title]"),
+      width: root.querySelector("[data-ranking-width]"),
+      limit: root.querySelector("[data-ranking-limit]"),
+      medals: root.querySelector("[data-ranking-medals]"),
+      canvas: root.querySelector("[data-ranking-canvas]"),
+      count: root.querySelector("[data-ranking-count]"),
+      status: root.querySelector("[data-ranking-status]"),
+      download: root.querySelector("[data-ranking-download]"),
+      copy: root.querySelector("[data-ranking-copy]")
+    };
+    const ctx = els.canvas.getContext("2d");
+    const medals = { 1: "\u{1f947}", 2: "\u{1f948}", 3: "\u{1f949}" };
+    const base = {
+      width: 724,
+      cardX: 6,
+      cardY: 43,
+      cardW: 703,
+      cardHeaderH: 46,
+      columnHeaderH: 35,
+      rowH: 38.25,
+      bottom: 9,
+      userX: 20,
+      markerX: 600,
+      pointsX: 696
+    };
+    const colors = {
+      bg: "#06130b",
+      card: "#07170e",
+      rowA: "#16291a",
+      rowB: "#0c1d12",
+      line: "#203c28",
+      lineStrong: "#2b5537",
+      white: "#ffffff",
+      muted: "#c9d8ca",
+      label: "#8fa282",
+      brand: "#b7f0bd",
+      accent: "#f2d477"
+    };
+
+    function selectedBoard() {
+      return data.boards.find((board) => board.key === els.board.value) || data.boards[0];
+    }
+
+    function selectedRows() {
+      const board = selectedBoard();
+      if (els.limit.value === "all") return board.rows;
+      return board.rows.slice(0, Number.parseInt(els.limit.value, 10) || 10);
+    }
+
+    function radiusRect(context, x, y, w, h, r) {
+      context.beginPath();
+      context.moveTo(x + r, y);
+      context.arcTo(x + w, y, x + w, y + h, r);
+      context.arcTo(x + w, y + h, x, y + h, r);
+      context.arcTo(x, y + h, x, y, r);
+      context.arcTo(x, y, x + r, y, r);
+      context.closePath();
+    }
+
+    function applyFont(size, weight = 400) {
+      ctx.font = `${weight} ${size}px "Segoe UI", Arial, Helvetica, sans-serif`;
+    }
+
+    function drawDottedUnderline(x, y, width) {
+      ctx.save();
+      ctx.strokeStyle = colors.label;
+      ctx.globalAlpha = 0.75;
+      ctx.setLineDash([1.5, 2.5]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + width, y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function drawTextFit(text, x, y, maxWidth, size, weight, color) {
+      let fontSize = size;
+      applyFont(fontSize, weight);
+      while (fontSize > 10 && ctx.measureText(text).width > maxWidth) {
+        fontSize -= 0.5;
+        applyFont(fontSize, weight);
+      }
+      ctx.fillStyle = color;
+      ctx.fillText(text, x, y);
+    }
+
+    function measureHeader(prefix, suffix, size) {
+      applyFont(size, 900);
+      const prefixW = ctx.measureText(prefix).width;
+      applyFont(size, 800);
+      const suffixW = ctx.measureText(suffix).width;
+      return { prefixW, total: prefixW + suffixW };
+    }
+
+    function drawHeaderTitle(text) {
+      const fullText = (text || "").trim() || "La Fija Mundialera - Tablas y premios";
+      const separator = " - ";
+      const splitAt = fullText.indexOf(separator);
+      const prefix = splitAt >= 0 ? fullText.slice(0, splitAt) : fullText;
+      const suffix = splitAt >= 0 ? fullText.slice(splitAt) : "";
+      const maxWidth = 690;
+      let size = 15;
+      let metrics = measureHeader(prefix, suffix, size);
+      while (size > 10 && metrics.total > maxWidth) {
+        size -= 0.5;
+        metrics = measureHeader(prefix, suffix, size);
+      }
+      ctx.textAlign = "left";
+      applyFont(size, 900);
+      ctx.fillStyle = colors.brand;
+      ctx.fillText(prefix, 12, 25);
+      if (suffix) {
+        applyFont(size, 800);
+        ctx.fillStyle = colors.label;
+        ctx.fillText(suffix, 12 + metrics.prefixW, 25);
+      }
+    }
+
+    function rowUserText(row) {
+      const medal = els.medals.value === "auto" && row.rank <= 3 ? `${medals[row.rank]} ` : "";
+      return `${row.rank}. ${medal}${row.user}`;
+    }
+
+    function render() {
+      const board = selectedBoard();
+      const rows = selectedRows();
+      const targetW = Math.max(520, Math.min(2160, Number(els.width.value) || base.width));
+      const scale = targetW / base.width;
+      const cardH = base.cardHeaderH + base.columnHeaderH + rows.length * base.rowH;
+      const targetH = Math.round((base.cardY + cardH + base.bottom) * scale);
+      els.canvas.width = targetW;
+      els.canvas.height = targetH;
+      ctx.save();
+      ctx.scale(scale, scale);
+      ctx.textBaseline = "alphabetic";
+      const logicalH = targetH / scale;
+      ctx.fillStyle = colors.bg;
+      ctx.fillRect(0, 0, base.width, logicalH);
+      drawHeaderTitle(els.title.value);
+      radiusRect(ctx, base.cardX, base.cardY, base.cardW, cardH, 6);
+      ctx.fillStyle = colors.card;
+      ctx.fill();
+      ctx.strokeStyle = colors.lineStrong;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.strokeStyle = colors.line;
+      ctx.beginPath();
+      ctx.moveTo(base.cardX, base.cardY + base.cardHeaderH);
+      ctx.lineTo(base.cardX + base.cardW, base.cardY + base.cardHeaderH);
+      ctx.moveTo(base.cardX, base.cardY + base.cardHeaderH + base.columnHeaderH);
+      ctx.lineTo(base.cardX + base.cardW, base.cardY + base.cardHeaderH + base.columnHeaderH);
+      ctx.stroke();
+
+      drawTextFit(board.title, 20, base.cardY + 30, 310, 16, 900, colors.white);
+      applyFont(14, 400);
+      ctx.fillStyle = colors.muted;
+      ctx.textAlign = "right";
+      ctx.fillText(board.subtitle, 695, base.cardY + 30);
+      ctx.textAlign = "left";
+
+      applyFont(12, 900);
+      ctx.fillStyle = colors.label;
+      ctx.fillText("Usuario", 20, base.cardY + base.cardHeaderH + 23);
+      ctx.fillText("Marcador", 552, base.cardY + base.cardHeaderH + 23);
+      ctx.fillText("Puntos", 653, base.cardY + base.cardHeaderH + 23);
+      drawDottedUnderline(20, base.cardY + base.cardHeaderH + 26, 47);
+      drawDottedUnderline(552, base.cardY + base.cardHeaderH + 26, 59);
+      drawDottedUnderline(653, base.cardY + base.cardHeaderH + 26, 42);
+
+      rows.forEach((row, index) => {
+        const y = base.cardY + base.cardHeaderH + base.columnHeaderH + index * base.rowH;
+        ctx.fillStyle = index % 2 === 0 ? colors.rowA : colors.rowB;
+        ctx.fillRect(base.cardX + 1, y, base.cardW - 2, base.rowH);
+        ctx.strokeStyle = colors.line;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(base.cardX, y + base.rowH);
+        ctx.lineTo(base.cardX + base.cardW, y + base.rowH);
+        ctx.stroke();
+        const baseline = y + 25;
+        ctx.textAlign = "left";
+        drawTextFit(rowUserText(row), base.userX, baseline, 500, 15, 400, colors.white);
+        applyFont(15, 900);
+        ctx.textAlign = "center";
+        ctx.fillStyle = colors.white;
+        ctx.fillText(row.marker, base.markerX, baseline);
+        ctx.textAlign = "right";
+        ctx.fillText(String(row.points), base.pointsX, baseline);
+      });
+      ctx.restore();
+      els.count.textContent = `${rows.length} ${rows.length === 1 ? "fila" : "filas"}`;
+      els.status.textContent = rows.length ? `PNG ${targetW} x ${targetH}` : "Sin filas para mostrar";
+    }
+
+    function downloadPng() {
+      render();
+      const link = document.createElement("a");
+      const stamp = new Date().toISOString().slice(0, 10);
+      link.download = `la-fija-ranking-${selectedBoard().key}-${stamp}.png`;
+      link.href = els.canvas.toDataURL("image/png");
+      link.click();
+      els.status.textContent = "PNG descargado.";
+    }
+
+    function copyPng() {
+      render();
+      if (!navigator.clipboard || !window.ClipboardItem) {
+        els.status.textContent = "Este navegador no permite copiar PNG aca; usa Descargar PNG.";
+        return;
+      }
+      els.canvas.toBlob(async (blob) => {
+        try {
+          await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+          els.status.textContent = "PNG copiado.";
+        } catch {
+          els.status.textContent = "No se pudo copiar; usa Descargar PNG.";
+        }
+      }, "image/png");
+    }
+
+    let renderTimer = 0;
+    function scheduleRender() {
+      window.clearTimeout(renderTimer);
+      renderTimer = window.setTimeout(render, 80);
+    }
+
+    [els.board, els.title, els.width, els.limit, els.medals].forEach((element) => {
+      element.addEventListener("input", scheduleRender);
+      element.addEventListener("change", scheduleRender);
+    });
+    els.download.addEventListener("click", downloadPng);
+    els.copy.addEventListener("click", copyPng);
+    render();
+  })();
+</script>
+{% endblock %}

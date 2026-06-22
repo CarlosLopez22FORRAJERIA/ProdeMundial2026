@@ -18,15 +18,19 @@
       {% endif %}
     </div>
     {% if g.user %}
-      <nav class="main-nav" aria-label="Principal">
-        <a class="{{ 'active' if request.endpoint == 'dashboard' else '' }}" href="{{ url_for('dashboard') }}">Jugar</a>
-        <a class="{{ 'active' if request.endpoint == 'fixture' else '' }}" href="{{ url_for('fixture') }}">Fixture</a>
-        <a class="{{ 'active' if request.endpoint == 'standings' else '' }}" href="{{ url_for('standings') }}">Tablas</a>
-        <a class="{{ 'active' if request.endpoint == 'chat' else '' }}" href="{{ url_for('chat') }}">Chat</a>
-        <a class="{{ 'active' if request.endpoint == 'legal_info' else '' }}" href="{{ url_for('legal_info') }}">Info</a>
-        {% if g.user.is_admin %}<a class="{{ 'active' if request.endpoint == 'admin' else '' }}" href="{{ url_for('admin') }}">Admin</a>{% endif %}
-        <a href="{{ url_for('logout') }}">Salir</a>
-      </nav>
+      <details class="nav-menu">
+        <summary class="nav-menu-toggle" aria-label="Abrir menu"><span>Menu</span></summary>
+        <nav class="main-nav" aria-label="Principal">
+          <a class="{{ 'active' if request.endpoint == 'dashboard' else '' }}" href="{{ url_for('dashboard') }}">Jugar</a>
+          <a class="{{ 'active' if request.endpoint == 'fixture' else '' }}" href="{{ url_for('fixture') }}">Fixture</a>
+          <a class="{{ 'active' if request.endpoint == 'standings' else '' }}" href="{{ url_for('standings') }}">Tablas</a>
+          <a class="{{ 'active' if request.endpoint == 'history' else '' }}" href="{{ url_for('history') }}">Historico</a>
+          <a class="{{ 'active' if request.endpoint == 'chat' else '' }}" href="{{ url_for('chat') }}">Chat</a>
+          <a class="{{ 'active' if request.endpoint == 'legal_info' else '' }}" href="{{ url_for('legal_info') }}">Info</a>
+          {% if g.user.is_admin %}<a class="{{ 'active' if request.endpoint in ['admin', 'admin_ranking_image'] else '' }}" href="{{ url_for('admin') }}">Admin</a>{% endif %}
+          <a href="{{ url_for('logout') }}">Salir</a>
+        </nav>
+      </details>
     {% endif %}
   </header>
   <main class="shell">
@@ -119,6 +123,20 @@
       });
     }
 
+    function initNavMenus(scope = document) {
+      scope.querySelectorAll(".nav-menu").forEach((menu) => {
+        if (menu.dataset.bound === "1") return;
+        menu.dataset.bound = "1";
+        document.addEventListener("click", (event) => {
+          if (!menu.open || menu.contains(event.target)) return;
+          menu.open = false;
+        });
+        menu.addEventListener("keydown", (event) => {
+          if (event.key === "Escape") menu.open = false;
+        });
+      });
+    }
+
     async function refreshDashboardPanels() {
       if (!document.querySelector("[data-dashboard-main]")) return;
       const scrollY = window.scrollY;
@@ -157,6 +175,11 @@
       let winner = "Empate";
       if (homeGoals > awayGoals) winner = form.dataset.homeTeam || "Local";
       if (awayGoals > homeGoals) winner = form.dataset.awayTeam || "Visitante";
+      if (homeGoals === awayGoals && form.dataset.isKnockout === "1") {
+        const selectedPenalty = form.querySelector('input[name^="penalty_winner"]:checked');
+        winner = selectedPenalty && selectedPenalty.value === "away" ? (form.dataset.awayTeam || "Visitante") : (form.dataset.homeTeam || "Local");
+        return `${winner} por penales ${homeGoals}-${awayGoals}`;
+      }
       return `${winner} ${homeGoals}-${awayGoals}`;
     }
 
@@ -179,6 +202,10 @@
         away.name = "away_goals";
         away.removeAttribute("form");
       }
+      form.querySelectorAll(`[name="penalty_winner_${gameId}"]`).forEach((input) => {
+        input.name = "penalty_winner";
+        input.removeAttribute("form");
+      });
       form.querySelectorAll('input[type="hidden"][name="game_id"]').forEach((input) => input.remove());
       if (state) {
         const button = document.createElement("button");
@@ -186,6 +213,79 @@
         button.textContent = "Actualizar";
         state.replaceWith(button);
       }
+    }
+
+    function scoreValue(input) {
+      const value = Number.parseInt(input?.value ?? "", 10);
+      return Number.isNaN(value) ? null : value;
+    }
+
+    function setPenaltyOptionState(container) {
+      container.querySelectorAll(".penalty-option").forEach((option) => {
+        const input = option.querySelector('input[type="radio"]');
+        option.classList.toggle("is-selected", Boolean(input && input.checked));
+      });
+    }
+
+    function updatePredictionPenaltyPanel(form) {
+      const panel = form.querySelector("[data-penalty-panel]");
+      if (!panel) return;
+      const gameId = form.dataset.gameId;
+      const homeInput = form.querySelector(`[name="home_goals_${gameId}"], [name="home_goals"]`);
+      const awayInput = form.querySelector(`[name="away_goals_${gameId}"], [name="away_goals"]`);
+      const homeGoals = scoreValue(homeInput);
+      const awayGoals = scoreValue(awayInput);
+      const show = form.dataset.isKnockout === "1" && homeGoals !== null && awayGoals !== null && homeGoals === awayGoals;
+      panel.hidden = !show;
+      const radios = panel.querySelectorAll('input[type="radio"]');
+      let hasChecked = false;
+      radios.forEach((radio) => {
+        radio.disabled = !show;
+        radio.required = show;
+        if (radio.checked) hasChecked = true;
+      });
+      if (show && !hasChecked && radios[0]) radios[0].checked = true;
+      setPenaltyOptionState(panel);
+      forcePredictionSummary(form);
+    }
+
+    function updateResultPenaltyPanel(form) {
+      const panel = form.querySelector("[data-result-penalty-panel]");
+      if (!panel) return;
+      const homeGoals = scoreValue(form.querySelector("[data-result-home-score]"));
+      const awayGoals = scoreValue(form.querySelector("[data-result-away-score]"));
+      const show = form.dataset.isKnockout === "1" && homeGoals !== null && awayGoals !== null && homeGoals === awayGoals;
+      panel.hidden = !show;
+      const radios = panel.querySelectorAll('input[type="radio"]');
+      let hasChecked = false;
+      radios.forEach((radio) => {
+        radio.disabled = !show;
+        radio.required = show;
+        if (radio.checked) hasChecked = true;
+      });
+      if (show && !hasChecked && radios[0]) radios[0].checked = true;
+      setPenaltyOptionState(panel);
+    }
+
+    function initPenaltyControls(scope = document) {
+      scope.querySelectorAll("[data-prediction-form]").forEach((form) => {
+        if (form.dataset.penaltyBound === "1") return;
+        form.dataset.penaltyBound = "1";
+        form.querySelectorAll('input[type="number"], input[name^="penalty_winner"]').forEach((input) => {
+          input.addEventListener("input", () => updatePredictionPenaltyPanel(form));
+          input.addEventListener("change", () => updatePredictionPenaltyPanel(form));
+        });
+        updatePredictionPenaltyPanel(form);
+      });
+      scope.querySelectorAll("[data-result-row]").forEach((form) => {
+        if (form.dataset.penaltyBound === "1") return;
+        form.dataset.penaltyBound = "1";
+        form.querySelectorAll('input[type="number"], input[name="result_penalty_winner"]').forEach((input) => {
+          input.addEventListener("input", () => updateResultPenaltyPanel(form));
+          input.addEventListener("change", () => updateResultPenaltyPanel(form));
+        });
+        updateResultPenaltyPanel(form);
+      });
     }
 
     function initPredictionForms(scope = document) {
@@ -250,9 +350,117 @@
       });
     }
 
+    function selectScoreInput(input) {
+      input.dataset.replaceOnType = "1";
+      input.dataset.replaceOriginalValue = input.value;
+      window.setTimeout(() => {
+        try {
+          input.select();
+        } catch {
+          input.setSelectionRange?.(0, input.value.length);
+        }
+      }, 0);
+    }
+
+    function replaceScoreInputValue(input, value) {
+      input.value = value;
+      input.dataset.replaceOnType = "0";
+      input.dataset.replaceOriginalValue = "";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    function shouldReplaceScoreInput(input) {
+      return input.dataset.replaceOnType === "1";
+    }
+
+    function initScoreInputSelection(scope = document) {
+      scope.querySelectorAll(".score-pick input[type='number']").forEach((input) => {
+        if (input.dataset.selectBound === "1") return;
+        input.dataset.selectBound = "1";
+        input.addEventListener("focus", () => selectScoreInput(input));
+        input.addEventListener("click", () => selectScoreInput(input));
+        input.addEventListener("touchend", () => selectScoreInput(input), { passive: true });
+        input.addEventListener("keydown", (event) => {
+          if (!shouldReplaceScoreInput(input)) return;
+          if (/^\d$/.test(event.key)) {
+            event.preventDefault();
+            replaceScoreInputValue(input, event.key);
+          } else if (event.key === "Backspace" || event.key === "Delete") {
+            event.preventDefault();
+            replaceScoreInputValue(input, "");
+          } else if (!["Shift", "Control", "Alt", "Meta"].includes(event.key)) {
+            input.dataset.replaceOriginalValue = input.value;
+          }
+        });
+        input.addEventListener("beforeinput", (event) => {
+          if (!shouldReplaceScoreInput(input)) return;
+          if (event.inputType && event.inputType.startsWith("insert") && /^\d+$/.test(event.data || "")) {
+            event.preventDefault();
+            replaceScoreInputValue(input, event.data);
+          }
+        });
+        input.addEventListener("input", () => {
+          if (shouldReplaceScoreInput(input)) {
+            const original = input.dataset.replaceOriginalValue || "";
+            if (original && input.value.startsWith(original) && input.value.length > original.length) {
+              input.value = input.value.slice(original.length);
+            }
+          }
+          input.dataset.replaceOnType = "0";
+          input.dataset.replaceOriginalValue = "";
+        });
+      });
+    }
+
+    function initAdminResultFilters(scope = document) {
+      scope.querySelectorAll("[data-result-filter]").forEach((form) => {
+        if (form.dataset.bound === "1") return;
+        form.dataset.bound = "1";
+        const select = form.querySelector("select[name='results_stage']");
+        const block = form.closest(".admin-block") || document;
+        const list = block.querySelector("[data-results-list]");
+        const count = form.querySelector("[data-result-count]");
+        if (!select || !list) return;
+
+        const applyFilter = () => {
+          const selected = select.value || "all";
+          let visible = 0;
+          list.querySelectorAll("[data-result-stage]").forEach((row) => {
+            const show = selected === "all" || row.dataset.resultStage === selected;
+            row.hidden = !show;
+            if (show) visible += 1;
+            row.querySelectorAll('input[name="results_stage"]').forEach((input) => {
+              input.value = selected;
+            });
+          });
+          if (count) {
+            count.textContent = `${visible} partidos`;
+          }
+          const url = new URL(window.location.href);
+          if (selected === "all") {
+            url.searchParams.set("results_stage", "all");
+          } else {
+            url.searchParams.set("results_stage", selected);
+          }
+          window.history.replaceState({}, "", url.toString());
+        };
+
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          applyFilter();
+        });
+        select.addEventListener("change", applyFilter);
+        applyFilter();
+      });
+    }
+
     function initInteractiveControls(scope = document) {
+      initNavMenus(scope);
       ensureFormCsrf(scope);
       initPasswordToggles(scope);
+      initScoreInputSelection(scope);
+      initAdminResultFilters(scope);
+      initPenaltyControls(scope);
       initPredictionForms(scope);
       initBatchPredictions(scope);
     }
