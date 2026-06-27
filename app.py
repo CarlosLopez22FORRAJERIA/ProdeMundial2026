@@ -3777,9 +3777,10 @@ def sync_promiedos_fixture() -> dict[str, int]:
         if not stage_key:
             stats["skipped"] += len(groups)
             continue
-        for group in groups:
+        for group_index, group in enumerate(groups, start=1):
+            placeholder_external_id = f"visual-bracket-{stage_key}-{group_index}"
             for game in group.get("games", []):
-                if import_promiedos_game(game, stage_key, stats, seen_external_ids):
+                if import_promiedos_game(game, stage_key, stats, seen_external_ids, placeholder_external_id):
                     seen_stage_keys.add(stage_key)
     if seen_external_ids:
         remove_seed_games()
@@ -3797,7 +3798,13 @@ def promiedos_rounds(value: str) -> list[int]:
     return rounds or [1, 2, 3]
 
 
-def import_promiedos_game(game: dict, stage_key: str, stats: dict[str, int], seen_external_ids: set[str]) -> bool:
+def import_promiedos_game(
+    game: dict,
+    stage_key: str,
+    stats: dict[str, int],
+    seen_external_ids: set[str],
+    placeholder_external_id: str | None = None,
+) -> bool:
     parsed = parse_promiedos_game(stage_key, game)
     if not parsed:
         stats["skipped"] += 1
@@ -3806,6 +3813,11 @@ def import_promiedos_game(game: dict, stage_key: str, stats: dict[str, int], see
         return True
     seen_external_ids.add(parsed["external_id"])
     existing = query_one("select id, fixture_manual from games where external_id = ?", (parsed["external_id"],))
+    if not existing and placeholder_external_id:
+        existing = query_one(
+            "select id, fixture_manual from games where external_id = ?",
+            (placeholder_external_id,),
+        )
     if not existing:
         existing = query_one(
             """
