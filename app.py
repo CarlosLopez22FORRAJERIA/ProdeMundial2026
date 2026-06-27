@@ -3759,18 +3759,28 @@ def sync_promiedos_fixture() -> dict[str, int]:
                 seen_stage_keys.add(stage_key)
     data = fetch_promiedos_json(settings["fixture_api_url"], settings.get("promiedos_x_ver", "1.11.7.5"))
     games_section = data.get("games", {})
-    if not isinstance(games_section, dict):
-        g.db.commit()
-        return stats
-    filters = games_section.get("filters", [])
-    for fixture_filter in filters:
-        stage_key = promiedos_stage_key(fixture_filter.get("name", ""))
+    if isinstance(games_section, dict):
+        filters = games_section.get("filters", [])
+        for fixture_filter in filters:
+            stage_key = promiedos_stage_key(fixture_filter.get("name", ""))
+            if not stage_key:
+                stats["skipped"] += len(fixture_filter.get("games", []))
+                continue
+            for game in fixture_filter.get("games", []):
+                if import_promiedos_game(game, stage_key, stats, seen_external_ids):
+                    seen_stage_keys.add(stage_key)
+    brackets_section = data.get("brackets", {})
+    stages = brackets_section.get("stages", []) if isinstance(brackets_section, dict) else []
+    for stage in stages:
+        stage_key = promiedos_stage_key(stage.get("name", ""))
+        groups = stage.get("groups", [])
         if not stage_key:
-            stats["skipped"] += len(fixture_filter.get("games", []))
+            stats["skipped"] += len(groups)
             continue
-        for game in fixture_filter.get("games", []):
-            if import_promiedos_game(game, stage_key, stats, seen_external_ids):
-                seen_stage_keys.add(stage_key)
+        for group in groups:
+            for game in group.get("games", []):
+                if import_promiedos_game(game, stage_key, stats, seen_external_ids):
+                    seen_stage_keys.add(stage_key)
     if seen_external_ids:
         remove_seed_games()
         remove_bracket_placeholders(seen_stage_keys)
@@ -3796,6 +3806,19 @@ def import_promiedos_game(game: dict, stage_key: str, stats: dict[str, int], see
         return True
     seen_external_ids.add(parsed["external_id"])
     existing = query_one("select id, fixture_manual from games where external_id = ?", (parsed["external_id"],))
+    if not existing:
+        existing = query_one(
+            """
+            select id, fixture_manual
+            from games
+            where stage_key = ?
+              and starts_at = ?
+              and external_id like 'visual-bracket-%'
+            order by id
+            limit 1
+            """,
+            (parsed["stage_key"], parsed["starts_at"]),
+        )
     result_status = source_result_status(promiedos_completed(game), parsed["result"], promiedos_started(game))
     penalty_winner = penalty_winner_for_result(
         parsed["stage_key"],
@@ -3811,11 +3834,12 @@ def import_promiedos_game(game: dict, stage_key: str, stats: dict[str, int], see
         g.db.execute(
             """
             update games
-            set stage_key = ?, starts_at = ?, home_team = ?, away_team = ?,
+            set external_id = ?, stage_key = ?, starts_at = ?, home_team = ?, away_team = ?,
                 home_score = ?, away_score = ?, result = ?, result_penalty_winner = ?, result_status = ?
             where id = ?
             """,
             (
+                parsed["external_id"],
                 parsed["stage_key"],
                 parsed["starts_at"],
                 parsed["home_team"],
@@ -3868,7 +3892,19 @@ def remove_bracket_placeholders(stage_keys: set[str]) -> None:
     bracket_stage_keys = {key for key, _label, order, _bonus in STAGES if order >= 4}
     for stage_key in sorted(stage_keys & bracket_stage_keys):
         g.db.execute(
-            "delete from games where stage_key = ? and external_id like ? and fixture_manual = 0",
+            """
+            delete from games
+            where stage_key = ?
+              and external_id like ?
+              and fixture_manual = 0
+              and exists (
+                  select 1
+                  from games imported
+                  where imported.stage_key = games.stage_key
+                    and imported.starts_at = games.starts_at
+                    and coalesce(imported.external_id, '') not like 'visual-bracket-%'
+              )
+            """,
             (stage_key, f"visual-bracket-{stage_key}-%"),
         )
 
